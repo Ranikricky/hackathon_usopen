@@ -11,6 +11,7 @@ OASIS Agent Profile生成器
 import json
 import random
 import time
+import uuid
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -208,6 +209,10 @@ class OasisProfileGenerator:
                 self.zep_client = Zep(api_key=self.zep_api_key)
             except Exception as e:
                 logger.warning(f"Zep客户端初始化失败: {e}")
+        
+        # A per-generator nonce prevents repeated runs from collapsing into the
+        # exact same personas when the graph/ontology is similar.
+        self.run_nonce = uuid.uuid4().hex[:12]
     
     def generate_profile_from_entity(
         self, 
@@ -701,6 +706,8 @@ Entity attributes: {attrs_str}
 Context:
 {context_str}
 
+Fresh persona run nonce: {self.run_nonce}-{random.randint(1000, 9999)}
+
 Return JSON with these fields:
 1. bio: English social-media bio, about 200 characters.
 2. persona: Detailed English persona in one plain-text paragraph, covering background, profession, education, location, personality, social-media style, viewpoint, unique traits, and relevant memories.
@@ -717,6 +724,7 @@ Important:
 - The persona must be one coherent paragraph.
 - {get_language_instruction()}
 - Keep the content consistent with the entity.
+- Create a unique representative character for this run; do not reuse a generic or previously generated persona.
 - age must be a valid integer, gender must be "male" or "female".
 """
 
@@ -743,6 +751,8 @@ Entity attributes: {attrs_str}
 Context:
 {context_str}
 
+Fresh persona run nonce: {self.run_nonce}-{random.randint(1000, 9999)}
+
 Return JSON with these fields:
 1. bio: English official-account bio, about 200 characters, professional tone.
 2. persona: Detailed English account persona in one plain-text paragraph, covering institution background, account role, audience, voice, posting style, stance, operating habits, and relevant memories.
@@ -759,6 +769,7 @@ Important:
 - The persona must be one coherent paragraph with no line breaks.
 - {get_language_instruction()}
 - age must be integer 30, gender must be "other".
+- Create a unique representative account for this run; do not reuse a generic or previously generated persona.
 - The account voice must fit the organization or group."""
     
     def _generate_profile_rule_based(

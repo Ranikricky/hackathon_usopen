@@ -44,11 +44,13 @@ class AgentGenerationEngine:
             return SimulationStateManager.agents_from_plan(domain_plan)
 
     def _generate_with_llm(self, domain_plan: Dict[str, Any], evidence_summary: str) -> List[Dict[str, Any]]:
+        generation_seed = domain_plan.get("generation_seed") or domain_plan.get("_generation_seed") or uuid.uuid4().hex[:12]
         system = (
             "You are Horizon XL's agent generation engine. Return only valid JSON. "
             "Generate structured causal agents, not shallow personas. Every agent "
             "must be useful for simulation, numeric forecasting, disagreement, and "
-            "state revision. Keep all content in English."
+            "state revision. Keep all content in English. Treat each request as a "
+            "fresh simulation run and do not reuse prior agent rosters."
         )
         prompt = f"""
 Generate agents for this simulation plan.
@@ -101,6 +103,12 @@ Simulation plan:
 
 Evidence summary:
 {evidence_summary[:8000]}
+
+Fresh generation seed:
+{generation_seed}
+
+Use the seed only to vary secondary character framing, information access,
+and interaction style. Preserve the core causal actors required by the plan.
 """
         result = self.llm_client.chat_json(
             messages=[
@@ -122,17 +130,19 @@ Evidence summary:
             for variable in domain_plan.get("target_variables", [])
         ]
         domain = domain_plan.get("domain", "other")
+        generation_seed = domain_plan.get("generation_seed") or domain_plan.get("_generation_seed") or uuid.uuid4().hex[:12]
         normalized = []
         for idx, agent in enumerate(agents, start=1):
             if not isinstance(agent, dict):
                 continue
             name = str(agent.get("name") or agent.get("role") or f"Agent {idx}")
-            agent_id = str(agent.get("agent_id") or f"agent_{idx:02d}_{uuid.uuid5(uuid.NAMESPACE_DNS, name).hex[:8]}")
+            agent_id = str(agent.get("agent_id") or f"agent_{idx:02d}_{uuid.uuid5(uuid.NAMESPACE_DNS, f'{generation_seed}:{idx}:{name}').hex[:8]}")
             numeric_capabilities = agent.get("numeric_capabilities") if isinstance(agent.get("numeric_capabilities"), dict) else {}
             normalized.append({
                 "agent_id": agent_id,
                 "name": name,
                 "domain": str(agent.get("domain") or domain),
+                "generation_seed": generation_seed,
                 "role": str(agent.get("role") or name),
                 "institutional_incentives": str(agent.get("institutional_incentives") or ""),
                 "causal_power": str(agent.get("causal_power") or ""),

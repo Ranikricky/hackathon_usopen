@@ -321,6 +321,7 @@ def generate_ontology():
         # Create project.
         project = ProjectManager.create_project(name=project_name)
         project.simulation_requirement = simulation_requirement
+        project.generation_seed = f"{project.project_id}:{uuid.uuid4().hex[:12]}"
         logger.info(f"Created project: {project.project_id}")
         
         # Input strategy:
@@ -393,22 +394,17 @@ def generate_ontology():
         ProjectManager.save_extracted_text(project.project_id, all_text)
         logger.info(f"Text extraction complete. characters={len(all_text)}")
         
-        # Generate ontology. Prompt-only mode uses a fast deterministic ontology so
-        # the app does not block on a long LLM call before the graph can be built.
+        # Generate ontology fresh for every project. We do not reuse previous
+        # ontology/agent outputs; the project generation seed nudges the LLM and
+        # fallback path to vary secondary actors on repeat prompts.
         logger.info("Generating ontology definition...")
         generator = OntologyGenerator()
-        if input_mode == "prompt":
-            ontology = generator.generate_fallback(
-                document_texts=document_texts,
-                simulation_requirement=simulation_requirement,
-                additional_context=additional_context if additional_context else None
-            )
-        else:
-            ontology = generator.generate(
-                document_texts=document_texts,
-                simulation_requirement=simulation_requirement,
-                additional_context=additional_context if additional_context else None
-            )
+        ontology = generator.generate(
+            document_texts=document_texts,
+            simulation_requirement=simulation_requirement,
+            additional_context=additional_context if additional_context else None,
+            generation_seed=project.generation_seed,
+        )
         
         # Save ontology to the project.
         entity_count = len(ontology.get("entity_types", []))
@@ -431,6 +427,7 @@ def generate_ontology():
                 "project_name": project.name,
                 "ontology": project.ontology,
                 "analysis_summary": project.analysis_summary,
+                "generation_seed": project.generation_seed,
                 "files": project.files,
                 "total_text_length": project.total_text_length
             }

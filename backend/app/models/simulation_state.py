@@ -126,12 +126,14 @@ class SimulationStateManager:
     def agents_from_plan(cls, domain_plan: Dict[str, Any]) -> List[Dict[str, Any]]:
         agents = []
         domain = domain_plan.get("domain", "other")
+        generation_seed = domain_plan.get("generation_seed") or domain_plan.get("_generation_seed") or uuid.uuid4().hex[:12]
         for idx, archetype in enumerate(domain_plan.get("required_agent_archetypes") or [], start=1):
             name = archetype.get("name") or f"Agent {idx}"
             agents.append({
-                "agent_id": f"agent_{idx:02d}_{uuid.uuid5(uuid.NAMESPACE_DNS, name).hex[:8]}",
+                "agent_id": f"agent_{idx:02d}_{uuid.uuid5(uuid.NAMESPACE_DNS, f'{generation_seed}:{idx}:{name}').hex[:8]}",
                 "name": name,
                 "domain": domain,
+                "generation_seed": generation_seed,
                 "role": name,
                 "institutional_incentives": archetype.get("likely_bias", ""),
                 "causal_power": archetype.get("causal_role", ""),

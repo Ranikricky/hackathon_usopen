@@ -5,6 +5,7 @@ Endpoint 1 analyzes user input and creates entity/relation type definitions.
 
 import json
 import logging
+import random
 import re
 from typing import Dict, Any, List, Optional
 from ..utils.llm_client import LLMClient
@@ -125,7 +126,7 @@ def _score_domain(text: str) -> str:
     return max(priority, key=lambda domain: (scores.get(domain, 0), -priority.index(domain))) if any(scores.values()) else "other"
 
 
-def _extract_explicit_agent_types(text: str, limit: int = 8) -> List[tuple[str, str]]:
+def _extract_explicit_agent_types(text: str, limit: int = 16) -> List[tuple[str, str]]:
     """Extract user-provided agent roles from prompts before falling back to domain templates."""
     if not text:
         return []
@@ -147,6 +148,7 @@ def _extract_explicit_agent_types(text: str, limit: int = 8) -> List[tuple[str, 
     candidate_text = "\n".join(sections)
     candidate_text = re.sub(r"\bas previously defined\b", "", candidate_text, flags=re.IGNORECASE)
     candidate_text = re.sub(r"agent architecture|agents include|agents?", "", candidate_text, flags=re.IGNORECASE)
+    candidate_text = re.sub(r"\bfor\s+horizon\s+xl\s*:?", "", candidate_text, flags=re.IGNORECASE)
     candidate_text = re.sub(r"\b\d+\s*-\s*\d+\b", "", candidate_text)
     candidate_text = candidate_text.replace("/", " ")
 
@@ -163,6 +165,7 @@ def _extract_explicit_agent_types(text: str, limit: int = 8) -> List[tuple[str, 
     seen = set()
 
     for raw in raw_items:
+        raw = re.split(r"\.|\bforecast\b|\btarget variables\b", raw, maxsplit=1, flags=re.IGNORECASE)[0]
         cleaned = re.sub(r"[^a-zA-Z0-9 /_-]+", " ", raw).strip(" -_/").strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
         lowered = cleaned.lower()
@@ -189,6 +192,24 @@ def _extract_explicit_agent_types(text: str, limit: int = 8) -> List[tuple[str, 
             break
 
     return results
+
+
+def _select_run_agent_types(
+    agents: List[tuple[str, str]],
+    generation_seed: Optional[str],
+    limit: int = 8
+) -> List[tuple[str, str]]:
+    """Keep core prompt actors but rotate secondary actors per run."""
+    if len(agents) <= limit:
+        return agents
+
+    # Keep the first two roles because users usually list the central opposing
+    # actors first, then vary the supporting observers and data actors.
+    anchors = agents[:2]
+    pool = agents[2:]
+    rng = random.Random(generation_seed or random.random())
+    rng.shuffle(pool)
+    return anchors + pool[:max(0, limit - len(anchors))]
 
 
 # Ontology generation system prompt.
@@ -261,7 +282,8 @@ class OntologyGenerator:
         self,
         document_texts: List[str],
         simulation_requirement: str,
-        additional_context: Optional[str] = None
+        additional_context: Optional[str] = None,
+        generation_seed: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate ontology definitions.
@@ -278,7 +300,8 @@ class OntologyGenerator:
         user_message = self._build_user_message(
             document_texts, 
             simulation_requirement,
-            additional_context
+            additional_context,
+            generation_seed
         )
         
         lang_instruction = get_language_instruction()
@@ -298,12 +321,12 @@ class OntologyGenerator:
         try:
             result = self.llm_client.chat_json(
                 messages=messages,
-                temperature=0.3,
+                temperature=0.65,
                 max_tokens=4096
             )
         except Exception as exc:
             logger.warning("Ontology LLM generation failed; using deterministic fallback: %s", exc)
-            result = self._fallback_ontology(simulation_requirement, document_texts, additional_context)
+            result = self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed)
         
         # Validate and post-process.
         result = self._validate_and_process(result)
@@ -314,11 +337,12 @@ class OntologyGenerator:
         self,
         document_texts: List[str],
         simulation_requirement: str,
-        additional_context: Optional[str] = None
+        additional_context: Optional[str] = None,
+        generation_seed: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate a deterministic ontology without calling the LLM."""
         return self._validate_and_process(
-            self._fallback_ontology(simulation_requirement, document_texts, additional_context)
+            self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed)
         )
     
     # Maximum text sent to the LLM.
@@ -328,7 +352,8 @@ class OntologyGenerator:
         self,
         document_texts: List[str],
         simulation_requirement: str,
-        additional_context: Optional[str]
+        additional_context: Optional[str],
+        generation_seed: Optional[str] = None,
     ) -> str:
         """Build the user message."""
         
@@ -357,7 +382,17 @@ class OntologyGenerator:
 {additional_context}
 """
         
-        message += """
+        message += f"""
+## Fresh Run Constraint
+
+Generation run id: {generation_seed or "fresh-unspecified-run"}
+
+This is a new simulation. Do not reuse any prior ontology, cached agent set, or generic default from another run.
+If the prompt explicitly lists agents or an "Agent Architecture", prioritize those actor roles.
+If no agents are listed, infer concrete actor roles from the specific domain, geography, topic, institutions, affected groups, data providers, and decision-makers in this prompt.
+Do not default to macroeconomic, banking, central-bank, or investment-bank actors unless the prompt is actually macro/finance.
+For the same prompt in a later run, it is acceptable and desirable to vary secondary observers, data actors, and representative personas while preserving the core causal actors.
+
 Design entity types and relationship types for a social/public-opinion simulation.
 
 Required rules:
@@ -406,7 +441,8 @@ Required rules:
         self,
         simulation_requirement: str,
         document_texts: List[str],
-        additional_context: Optional[str]
+        additional_context: Optional[str],
+        generation_seed: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Return a safe English ontology when the LLM is unavailable or returns invalid JSON."""
         text = " ".join([simulation_requirement or "", additional_context or "", " ".join(document_texts or [])]).lower()
@@ -416,6 +452,7 @@ Required rules:
         )
 
         if explicit_agents:
+            explicit_agents = _select_run_agent_types(explicit_agents, generation_seed)
             entity_types = explicit_agents + [
                 ("Person", "Any individual person not fitting another specific type."),
                 ("Organization", "Any organization not fitting another specific type."),

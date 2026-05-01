@@ -39,6 +39,7 @@ class Project:
     # 本体信息（接口1生成后填充）
     ontology: Optional[Dict[str, Any]] = None
     analysis_summary: Optional[str] = None
+    generation_seed: Optional[str] = None
     
     # 图谱信息（接口2完成后填充）
     graph_id: Optional[str] = None
@@ -64,6 +65,7 @@ class Project:
             "total_text_length": self.total_text_length,
             "ontology": self.ontology,
             "analysis_summary": self.analysis_summary,
+            "generation_seed": self.generation_seed,
             "graph_id": self.graph_id,
             "graph_build_task_id": self.graph_build_task_id,
             "simulation_requirement": self.simulation_requirement,
@@ -89,6 +91,7 @@ class Project:
             total_text_length=data.get('total_text_length', 0),
             ontology=data.get('ontology'),
             analysis_summary=data.get('analysis_summary'),
+            generation_seed=data.get('generation_seed'),
             graph_id=data.get('graph_id'),
             graph_build_task_id=data.get('graph_build_task_id'),
             simulation_requirement=data.get('simulation_requirement'),
