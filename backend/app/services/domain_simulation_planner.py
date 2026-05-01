@@ -17,12 +17,19 @@ from ..utils.logger import get_logger
 logger = get_logger("horizonxl.services.domain_simulation_planner")
 
 
+def _keyword_present(text: str, keyword: str) -> bool:
+    """Match terms safely so short keywords like 'ai' do not match unrelated words."""
+    pattern = re.escape(keyword.lower()).replace(r"\ ", r"\s+")
+    return re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", text) is not None
+
+
 DOMAINS = {
     "macro",
     "election",
     "oil",
     "ai_future",
     "geopolitics",
+    "transport",
     "market",
     "social",
     "business",
@@ -189,6 +196,27 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
 }
 
 DOMAIN_TEMPLATES.update({
+    "transport": {
+        "target_variables": [
+            {"name": "commute_delay_minutes", "unit": "minutes", "required": True, "description": "Expected average commute delay."},
+            {"name": "service_disruption_index", "unit": "index", "required": True, "description": "Severity of route cancellations, crowding, and reliability loss."},
+            {"name": "ridership_shift", "unit": "percent", "required": False, "description": "Share of riders shifting to alternate modes."},
+        ],
+        "state_variables": [
+            {"name": "labor_action_intensity", "unit": "index", "directional_interpretation": "Higher means broader or longer work stoppage.", "required": True},
+            {"name": "alternate_capacity", "unit": "index", "directional_interpretation": "Higher means more substitute transport capacity.", "required": True},
+            {"name": "public_tolerance", "unit": "index", "directional_interpretation": "Higher means less public backlash from disruption.", "required": False},
+        ],
+        "agents": [
+            ("Transit Authority", "Controls service plans, public alerts, and contingency operations.", "Route capacity, staffing, and service data.", "May understate disruption risk.", 0.14, ["agency operations", "communications lead"]),
+            ("Operator Union", "Controls strike participation and labor demands.", "Worker sentiment and negotiation stance.", "May overstate bargaining leverage.", 0.16, ["union negotiator", "rank-and-file operator"]),
+            ("Commuter Segments", "Create demand shifts and lived delay outcomes.", "Ground-level commute conditions.", "May vary by route and income.", 0.34, ["daily rail commuter", "bus-dependent rider", "suburban commuter", "low-income worker"]),
+            ("City Government", "Coordinates public response and political pressure.", "Emergency planning and negotiation leverage.", "May prioritize optics.", 0.12, ["mayor office", "transport department"]),
+            ("Employers and Schools", "Adjust attendance, hours, and remote-work policies.", "Workplace absenteeism and schedule flexibility.", "May not represent hourly workers.", 0.10, ["large employer", "school administrator"]),
+            ("Mobility and Traffic Analysts", "Quantify delay paths and alternate-mode capacity.", "Traffic, rideshare, road, and service data.", "May miss behavioral adaptation.", 0.14, ["traffic analyst", "mobility provider", "local journalist"]),
+        ],
+        "granularity": "daily",
+    },
     "geopolitics": {
         "target_variables": [
             {"name": "escalation_probability", "unit": "probability", "required": True, "description": "Probability of escalation or de-escalation over the horizon."},
@@ -568,6 +596,7 @@ Planning rules:
             "oil": ["oil", "brent", "wti", "opec", "crude", "barrel", "inventory", "refinery", "shale"],
             "ai_future": ["ai", "artificial intelligence", "frontier model", "model capability", "open-source", "enterprise adoption", "gpu", "llm"],
             "geopolitics": ["geopolitic", "war", "sanction", "diplomacy", "conflict", "country risk", "military", "border"],
+            "transport": ["transport", "transportation", "transit", "commute", "commuter", "metro", "subway", "bus", "rail", "train", "traffic", "strike", "labor action", "public service", "ridership", "delay"],
             "healthcare": ["healthcare", "hospital", "patient", "doctor", "drug", "vaccine", "public health", "insurance", "pharma"],
             "climate": ["climate", "carbon", "emissions", "renewable", "solar", "wind", "grid", "energy transition", "flood", "drought"],
             "real_estate": ["real estate", "housing price", "home price", "mortgage", "rent", "tenant", "landlord", "developer"],
@@ -584,12 +613,12 @@ Planning rules:
             "macro": ["unemployment", "gdp", "inflation", "interest rate", "recession", "macro", "fed", "central bank"],
         }
         priority = [
-            "election", "oil", "ai_future", "geopolitics", "healthcare", "climate",
+            "election", "oil", "ai_future", "geopolitics", "transport", "healthcare", "climate",
             "real_estate", "crypto", "supply_chain", "education", "policy",
             "technology", "sports", "consumer", "business", "social", "market", "macro",
         ]
         scores = {
-            domain: sum(1 for keyword in keywords if keyword in lowered)
+            domain: sum(1 for keyword in keywords if _keyword_present(lowered, keyword))
             for domain, keywords in keyword_map.items()
         }
         if any(scores.values()):

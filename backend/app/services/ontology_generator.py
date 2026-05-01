@@ -24,6 +24,12 @@ def _to_pascal_case(name: str) -> str:
     return result if result else 'Unknown'
 
 
+def _keyword_present(text: str, keyword: str) -> bool:
+    """Match keywords as terms so short strings like 'ai' do not match random words."""
+    pattern = re.escape(keyword.lower()).replace(r"\ ", r"\s+")
+    return re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", text) is not None
+
+
 def _score_domain(text: str) -> str:
     """Infer the most likely simulation domain from prompt/context text."""
     lowered = text.lower()
@@ -45,6 +51,11 @@ def _score_domain(text: str) -> str:
         "geopolitics": [
             "geopolitic", "war", "sanction", "diplomacy", "conflict", "military",
             "border", "country risk", "treaty", "ceasefire", "escalation", "alliance",
+        ],
+        "transport": [
+            "transport", "transportation", "transit", "commute", "commuter", "metro",
+            "subway", "bus", "rail", "train", "traffic", "strike", "labor action",
+            "public service", "city service", "ridership", "delay", "route",
         ],
         "market": [
             "stock", "bond", "equity", "yield", "volatility", "earnings", "rates",
@@ -115,11 +126,11 @@ def _score_domain(text: str) -> str:
 
     scores = {}
     for domain, keywords in domain_keywords.items():
-        scores[domain] = sum(1 for keyword in keywords if keyword in lowered)
+        scores[domain] = sum(1 for keyword in keywords if _keyword_present(lowered, keyword))
 
     # Prefer concrete event domains when scores tie with broad macro/market language.
     priority = [
-        "election", "oil", "ai_future", "geopolitics", "healthcare", "climate",
+        "election", "oil", "ai_future", "geopolitics", "transport", "healthcare", "climate",
         "real_estate", "crypto", "supply_chain", "education", "policy",
         "technology", "sports", "consumer", "business", "social", "market", "macro",
     ]
@@ -221,6 +232,7 @@ DOMAIN_ENTITY_MARKERS = {
     "oil": ["opec", "oil", "crude", "brent", "wti", "shale", "refiner", "trader", "shipping", "inventory"],
     "ai_future": ["ai", "lab", "model", "open", "source", "enterprise", "regulator", "worker", "compute"],
     "geopolitics": ["state", "military", "diplomat", "sanction", "intelligence", "ally", "border", "government"],
+    "transport": ["transit", "transport", "commuter", "operator", "union", "city", "traffic", "route", "ridership"],
     "market": ["investor", "trader", "issuer", "liquidity", "credit", "strategist", "portfolio", "market"],
     "business": ["executive", "customer", "competitor", "sales", "product", "channel", "investor", "business"],
     "healthcare": ["patient", "clinician", "provider", "payer", "pharma", "health", "regulator", "doctor"],
@@ -658,6 +670,30 @@ Required rules:
                 ("CONFLICTS_WITH", "Has adversarial strategic interaction.", "NationalGovernment", "NationalGovernment"),
             ]
             summary = "Fallback geopolitics ontology for states, military actors, diplomats, sanctions, intelligence, allies, and narratives."
+        elif domain == "transport":
+            entity_types = [
+                ("TransitAuthority", "Public agency coordinating transit service and public communications."),
+                ("OperatorUnion", "Worker or union actor shaping strike action and labor demands."),
+                ("CommuterSegment", "Rider group experiencing delays, substitutions, and behavior changes."),
+                ("CityGovernment", "Municipal decision maker balancing service continuity and labor politics."),
+                ("TrafficOperationsAnalyst", "Analyst forecasting route delays, congestion, and capacity substitution."),
+                ("BusinessEmployer", "Employer affected by commute reliability and worker attendance."),
+                ("MobilityProvider", "Alternative transport provider such as taxi, rideshare, cycling, or shuttle services."),
+                ("LocalJournalist", "Reporter tracking public reaction, service alerts, and negotiation signals."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("OPERATES_SERVICE", "Operates transit routes, schedules, or service capacity.", "TransitAuthority", "CommuterSegment"),
+                ("NEGOTIATES_WITH", "Negotiates labor terms or strike resolution.", "OperatorUnion", "TransitAuthority"),
+                ("DISRUPTS_COMMUTE", "Creates commute delays or service disruption.", "OperatorUnion", "CommuterSegment"),
+                ("COORDINATES_RESPONSE", "Coordinates public response and contingency plans.", "CityGovernment", "TransitAuthority"),
+                ("FORECASTS_DELAY", "Forecasts commute delays, congestion, or route substitution.", "TrafficOperationsAnalyst", "CityGovernment"),
+                ("AFFECTS_ATTENDANCE", "Changes worker attendance or operating hours.", "CommuterSegment", "BusinessEmployer"),
+                ("ABSORBS_DEMAND", "Absorbs displaced travel demand.", "MobilityProvider", "CommuterSegment"),
+                ("REPORTS_SIGNAL", "Reports negotiation status, ground conditions, or public sentiment.", "LocalJournalist", "Organization"),
+            ]
+            summary = "Fallback transport/public-service ontology for transit agencies, unions, commuters, city officials, traffic analysts, employers, mobility alternatives, and journalists."
         elif domain == "market":
             entity_types = [
                 ("InstitutionalInvestor", "Large investor allocating capital and risk."),
