@@ -1025,10 +1025,16 @@ html[lang="en"] .workflow-list {
 }
 
 .nav-brand {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
   font-family: var(--hx-font-display);
   font-size: 0.98rem;
   font-weight: 700;
   letter-spacing: 0.18em;
+  min-width: max-content;
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .nav-brand::before {

@@ -14,18 +14,27 @@
   font-weight: 800;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  line-height: 1;
+  line-height: 1.18;
+  padding: 0.08em 0.08em 0.1em 0;
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .brand-mark__hero,
 .brand-mark__xl {
+  display: inline-block;
   font-size: 1em;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.1em;
 }
 
 .brand-mark__body {
+  display: inline-block;
   font-size: 0.68em;
   letter-spacing: 0.28em;
   transform: translateY(-0.07em);
+}
+
+.brand-mark__xl {
+  padding-right: 0.08em;
 }
 </style>
