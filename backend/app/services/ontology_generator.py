@@ -315,29 +315,60 @@ Required rules:
         domain = _score_domain(text)
 
         if domain == "election":
-            entity_types = [
-                ("RulingPartyStrategist", "Incumbent party strategist managing campaign decisions."),
-                ("OppositionPartyStrategist", "Opposition party strategist targeting swing voters."),
-                ("AllianceNegotiator", "Actor shaping alliances, seat sharing, and vote transfers."),
-                ("VoterBlocAnalyst", "Analyst representing caste, class, religion, or regional voter blocs."),
-                ("WomenWelfareVoter", "Women voter bloc influenced by welfare delivery and safety issues."),
-                ("YouthEmploymentVoter", "Young voter bloc focused on jobs, migration, and opportunity."),
-                ("RegionalObserver", "Local observer tracking constituency and regional swings."),
-                ("PollsterDataAnalyst", "Election analyst producing vote and seat forecasts."),
-                ("Person", "Any individual person not fitting another specific type."),
-                ("Organization", "Any organization not fitting another specific type."),
-            ]
-            edge_types = [
-                ("MOBILIZES", "Mobilizes or persuades a voter bloc.", "Organization", "VoterBlocAnalyst"),
-                ("TARGETS_REGION", "Focuses campaign effort on a region or constituency.", "Organization", "RegionalObserver"),
-                ("NEGOTIATES_WITH", "Negotiates alliance or seat-sharing terms.", "AllianceNegotiator", "Organization"),
-                ("INFLUENCES_TURNOUT", "Affects turnout behavior for a voter group.", "Organization", "VoterBlocAnalyst"),
-                ("REPORTS_SIGNAL", "Reports polling, turnout, or ground-level signal.", "RegionalObserver", "PollsterDataAnalyst"),
-                ("FORECASTS_RESULT", "Produces vote-share or seat-share forecasts.", "PollsterDataAnalyst", "Organization"),
-                ("REPRESENTS_VOTERS", "Represents lived concerns of a voter bloc.", "Person", "VoterBlocAnalyst"),
-                ("CONTESTS_AGAINST", "Competes electorally against another party.", "Organization", "Organization"),
-            ]
-            summary = "Fallback election ontology for parties, voter blocs, regional observers, alliances, turnout, and polling."
+            is_bengal = any(term in text for term in ["west bengal", "bengal", "tmc", "aitc", "mamata", "bjp", "lakshmir"])
+            if is_bengal:
+                entity_types = [
+                    ("TmcCampaignStrategist", "TMC strategist managing incumbent campaign and welfare narrative."),
+                    ("BjpCampaignStrategist", "BJP strategist targeting anti-incumbency and swing regions."),
+                    ("LeftCongressNegotiator", "Left/Congress actor shaping alliance and vote-split dynamics."),
+                    ("MinorityVoterBlocAnalyst", "Analyst tracking Muslim/minority consolidation and turnout."),
+                    ("WomenWelfareVoterBloc", "Women voter bloc influenced by welfare, safety, and delivery."),
+                    ("YouthEmploymentVoterBloc", "Young voter bloc focused on jobs, migration, and opportunity."),
+                    ("RegionalGroundObserver", "Local observer tracking Bengal region and constituency swings."),
+                    ("PollsterDataScientist", "Election analyst forecasting vote share, seats, and uncertainty."),
+                    ("Person", "Any individual person not fitting another specific type."),
+                    ("Organization", "Any organization not fitting another specific type."),
+                ]
+            else:
+                entity_types = [
+                    ("RulingPartyStrategist", "Incumbent party strategist managing campaign decisions."),
+                    ("OppositionPartyStrategist", "Opposition party strategist targeting swing voters."),
+                    ("AllianceNegotiator", "Actor shaping alliances, seat sharing, and vote transfers."),
+                    ("VoterBlocAnalyst", "Analyst representing caste, class, religion, or regional voter blocs."),
+                    ("WomenWelfareVoter", "Women voter bloc influenced by welfare delivery and safety issues."),
+                    ("YouthEmploymentVoter", "Young voter bloc focused on jobs, migration, and opportunity."),
+                    ("RegionalObserver", "Local observer tracking constituency and regional swings."),
+                    ("PollsterDataAnalyst", "Election analyst producing vote and seat forecasts."),
+                    ("Person", "Any individual person not fitting another specific type."),
+                    ("Organization", "Any organization not fitting another specific type."),
+                ]
+            if is_bengal:
+                edge_types = [
+                    ("MOBILIZES", "Mobilizes or persuades a voter bloc.", "TmcCampaignStrategist", "WomenWelfareVoterBloc"),
+                    ("TARGETS_REGION", "Focuses campaign effort on a region or constituency.", "BjpCampaignStrategist", "RegionalGroundObserver"),
+                    ("NEGOTIATES_WITH", "Negotiates alliance or seat-sharing terms.", "LeftCongressNegotiator", "Organization"),
+                    ("INFLUENCES_TURNOUT", "Affects turnout behavior for a voter group.", "TmcCampaignStrategist", "MinorityVoterBlocAnalyst"),
+                    ("REPORTS_SIGNAL", "Reports polling, turnout, or ground-level signal.", "RegionalGroundObserver", "PollsterDataScientist"),
+                    ("FORECASTS_RESULT", "Produces vote-share or seat-share forecasts.", "PollsterDataScientist", "Organization"),
+                    ("REPRESENTS_VOTERS", "Represents lived concerns of a voter bloc.", "Person", "YouthEmploymentVoterBloc"),
+                    ("CONTESTS_AGAINST", "Competes electorally against another party.", "TmcCampaignStrategist", "BjpCampaignStrategist"),
+                ]
+            else:
+                edge_types = [
+                    ("MOBILIZES", "Mobilizes or persuades a voter bloc.", "Organization", "VoterBlocAnalyst"),
+                    ("TARGETS_REGION", "Focuses campaign effort on a region or constituency.", "Organization", "RegionalObserver"),
+                    ("NEGOTIATES_WITH", "Negotiates alliance or seat-sharing terms.", "AllianceNegotiator", "Organization"),
+                    ("INFLUENCES_TURNOUT", "Affects turnout behavior for a voter group.", "Organization", "VoterBlocAnalyst"),
+                    ("REPORTS_SIGNAL", "Reports polling, turnout, or ground-level signal.", "RegionalObserver", "PollsterDataAnalyst"),
+                    ("FORECASTS_RESULT", "Produces vote-share or seat-share forecasts.", "PollsterDataAnalyst", "Organization"),
+                    ("REPRESENTS_VOTERS", "Represents lived concerns of a voter bloc.", "Person", "VoterBlocAnalyst"),
+                    ("CONTESTS_AGAINST", "Competes electorally against another party.", "Organization", "Organization"),
+                ]
+            summary = (
+                "Fallback West Bengal election ontology for TMC, BJP, Left/Congress, voter blocs, regions, turnout, and polling."
+                if is_bengal else
+                "Fallback election ontology for parties, voter blocs, regional observers, alliances, turnout, and polling."
+            )
         elif domain == "oil":
             entity_types = [
                 ("OpecDelegate", "Producer-group actor shaping coordinated supply decisions."),
