@@ -23,6 +23,55 @@ def _to_pascal_case(name: str) -> str:
     return result if result else 'Unknown'
 
 
+def _score_domain(text: str) -> str:
+    """Infer the most likely simulation domain from prompt/context text."""
+    lowered = text.lower()
+    domain_keywords = {
+        "election": [
+            "election", "assembly", "lok sabha", "vote share", "seat share", "turnout",
+            "campaign", "polling", "candidate", "party", "alliance", "constituency",
+            "voter", "swing", "bjp", "tmc", "congress", "cpi", "left front", "west bengal",
+        ],
+        "oil": [
+            "oil", "brent", "wti", "opec", "crude", "barrel", "inventory", "refinery",
+            "shale", "spare capacity", "tanker", "lng", "diesel", "gasoline",
+        ],
+        "ai_future": [
+            "ai", "artificial intelligence", "frontier model", "model capability",
+            "open-source", "open source", "enterprise adoption", "gpu", "compute",
+            "capex", "foundation model", "llm", "automation",
+        ],
+        "geopolitics": [
+            "geopolitic", "war", "sanction", "diplomacy", "conflict", "military",
+            "border", "country risk", "treaty", "ceasefire", "escalation", "alliance",
+        ],
+        "market": [
+            "stock", "bond", "equity", "yield", "volatility", "earnings", "rates",
+            "credit spread", "market shock", "portfolio", "index", "liquidity",
+        ],
+        "business": [
+            "business strategy", "sales", "customer", "pricing", "competitor", "market share",
+            "go-to-market", "retention", "churn", "product launch", "brand",
+        ],
+        "social": [
+            "social", "media narrative", "public opinion", "consumer trend", "culture",
+            "influencer", "sentiment", "viral", "community", "discourse",
+        ],
+        "macro": [
+            "unemployment", "gdp", "inflation", "interest rate", "recession", "macro",
+            "federal reserve", "central bank", "credit", "housing", "labor market",
+        ],
+    }
+
+    scores = {}
+    for domain, keywords in domain_keywords.items():
+        scores[domain] = sum(1 for keyword in keywords if keyword in lowered)
+
+    # Prefer concrete event domains when scores tie with broad macro/market language.
+    priority = ["election", "oil", "ai_future", "geopolitics", "business", "social", "market", "macro"]
+    return max(priority, key=lambda domain: (scores.get(domain, 0), -priority.index(domain))) if any(scores.values()) else "other"
+
+
 # Ontology generation system prompt.
 ONTOLOGY_SYSTEM_PROMPT = """You are an expert knowledge-graph ontology designer. Analyze the supplied documents and simulation requirement, then design entity and relationship types for a social/public-opinion simulation.
 
@@ -210,16 +259,9 @@ Required rules:
     ) -> Dict[str, Any]:
         """Return a safe English ontology when the LLM is unavailable or returns invalid JSON."""
         text = " ".join([simulation_requirement or "", additional_context or "", " ".join(document_texts or [])]).lower()
-        is_election = any(term in text for term in [
-            "election", "assembly", "vote share", "seat share", "turnout", "campaign",
-            "polling", "candidate", "party", "alliance", "constituency", "voter",
-            "bjp", "tmc", "congress", "cpi", "left front", "west bengal", "bengal"
-        ])
-        is_macro = any(term in text for term in [
-            "unemployment", "macro", "gdp", "inflation", "housing", "federal reserve", "fed", "credit", "recession"
-        ])
+        domain = _score_domain(text)
 
-        if is_election:
+        if domain == "election":
             entity_types = [
                 ("RulingPartyStrategist", "Incumbent party strategist managing campaign decisions."),
                 ("OppositionPartyStrategist", "Opposition party strategist targeting swing voters."),
@@ -243,7 +285,151 @@ Required rules:
                 ("CONTESTS_AGAINST", "Competes electorally against another party.", "Organization", "Organization"),
             ]
             summary = "Fallback election ontology for parties, voter blocs, regional observers, alliances, turnout, and polling."
-        elif is_macro:
+        elif domain == "oil":
+            entity_types = [
+                ("OpecDelegate", "Producer-group actor shaping coordinated supply decisions."),
+                ("ShaleProducer", "Producer responding to price, costs, and financing."),
+                ("DemandAnalyst", "Analyst tracking consumption and import demand."),
+                ("CommodityTrader", "Market participant pricing risk and positioning."),
+                ("Refiner", "Downstream actor converting crude into products."),
+                ("ShippingOperator", "Logistics actor exposed to routes and chokepoints."),
+                ("EnergyMinister", "Government actor shaping policy and strategic reserves."),
+                ("InventoryReporter", "Data actor reporting stocks, flows, and balances."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("SETS_SUPPLY", "Influences crude supply availability.", "OpecDelegate", "Organization"),
+                ("RESPONDS_TO_PRICE", "Changes activity based on price signals.", "ShaleProducer", "CommodityTrader"),
+                ("FORECASTS_DEMAND", "Produces demand and import forecasts.", "DemandAnalyst", "Organization"),
+                ("TRADES_WITH", "Trades or hedges exposure with another actor.", "CommodityTrader", "Organization"),
+                ("REFINES_FOR", "Converts crude supply into product demand.", "Refiner", "Organization"),
+                ("DISRUPTS_ROUTE", "Affects logistics routes or shipping costs.", "ShippingOperator", "Organization"),
+                ("REGULATES_MARKET", "Sets policy that affects energy markets.", "EnergyMinister", "Organization"),
+                ("REPORTS_INVENTORY", "Reports inventory or supply-demand data.", "InventoryReporter", "CommodityTrader"),
+            ]
+            summary = "Fallback oil-market ontology for producers, demand, traders, refiners, shipping, policy, and inventories."
+        elif domain == "ai_future":
+            entity_types = [
+                ("FrontierLab", "AI lab advancing model capability and deployment."),
+                ("OpenSourceDeveloper", "Developer community diffusing AI capabilities."),
+                ("EnterpriseBuyer", "Organization adopting AI into workflows."),
+                ("Regulator", "Policy actor shaping AI rules and enforcement."),
+                ("ComputeProvider", "Infrastructure actor supplying chips and cloud capacity."),
+                ("Investor", "Capital allocator funding AI infrastructure and startups."),
+                ("WorkerGroup", "Labor group affected by automation and augmentation."),
+                ("ConsumerUser", "End user shaping trust, demand, and adoption."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("BUILDS_MODEL", "Creates or improves AI model capability.", "FrontierLab", "Organization"),
+                ("RELEASES_TOOLING", "Publishes open models, tools, or workflows.", "OpenSourceDeveloper", "EnterpriseBuyer"),
+                ("ADOPTS_SYSTEM", "Deploys AI systems in production.", "EnterpriseBuyer", "FrontierLab"),
+                ("REGULATES", "Creates rules or enforcement pressure.", "Regulator", "Organization"),
+                ("SUPPLIES_COMPUTE", "Provides compute infrastructure or chips.", "ComputeProvider", "FrontierLab"),
+                ("FUNDS", "Funds labs, infrastructure, or applications.", "Investor", "Organization"),
+                ("RESISTS_OR_ADAPTS", "Changes behavior in response to AI impact.", "WorkerGroup", "EnterpriseBuyer"),
+                ("USES_PRODUCT", "Uses AI products and shapes demand.", "ConsumerUser", "Organization"),
+            ]
+            summary = "Fallback AI-future ontology for labs, open source, enterprises, regulators, compute, investors, workers, and users."
+        elif domain == "geopolitics":
+            entity_types = [
+                ("NationalGovernment", "State actor making strategic decisions."),
+                ("MilitaryCommand", "Actor controlling force posture and operations."),
+                ("Diplomat", "Negotiator managing talks, treaties, and de-escalation."),
+                ("SanctionsAuthority", "Actor imposing or relaxing economic restrictions."),
+                ("IntelligenceAnalyst", "Actor assessing risk, intent, and capabilities."),
+                ("RegionalAlly", "Aligned state or bloc influencing outcomes."),
+                ("HumanitarianActor", "Civilian-impact actor tracking displacement and aid."),
+                ("MediaObserver", "Narrative actor reporting and framing events."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("NEGOTIATES_WITH", "Conducts diplomatic negotiation.", "Diplomat", "NationalGovernment"),
+                ("DEPLOYS_FORCE", "Changes military posture or operations.", "MilitaryCommand", "Organization"),
+                ("IMPOSES_SANCTION", "Applies economic or legal restrictions.", "SanctionsAuthority", "Organization"),
+                ("ASSESSES_RISK", "Analyzes capability, intent, or escalation risk.", "IntelligenceAnalyst", "NationalGovernment"),
+                ("SUPPORTS_ALLY", "Provides strategic or material support.", "RegionalAlly", "NationalGovernment"),
+                ("REPORTS_IMPACT", "Reports civilian or humanitarian impact.", "HumanitarianActor", "MediaObserver"),
+                ("FRAMES_EVENT", "Shapes public narrative around an event.", "MediaObserver", "Organization"),
+                ("CONFLICTS_WITH", "Has adversarial strategic interaction.", "NationalGovernment", "NationalGovernment"),
+            ]
+            summary = "Fallback geopolitics ontology for states, military actors, diplomats, sanctions, intelligence, allies, and narratives."
+        elif domain == "market":
+            entity_types = [
+                ("InstitutionalInvestor", "Large investor allocating capital and risk."),
+                ("RetailInvestor", "Individual market participant shaping flows."),
+                ("MarketMaker", "Liquidity provider setting spreads and execution."),
+                ("CorporateIssuer", "Company whose fundamentals affect valuation."),
+                ("CentralBankWatcher", "Analyst tracking policy and rate expectations."),
+                ("CreditAnalyst", "Actor assessing default and balance-sheet risk."),
+                ("MacroStrategist", "Analyst linking macro data to market prices."),
+                ("FinancialMedia", "Media actor amplifying market narratives."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("ALLOCATES_CAPITAL", "Moves capital across assets or sectors.", "InstitutionalInvestor", "Organization"),
+                ("TRADES_ASSET", "Buys, sells, or hedges market exposure.", "RetailInvestor", "MarketMaker"),
+                ("PROVIDES_LIQUIDITY", "Provides liquidity or market-making.", "MarketMaker", "Organization"),
+                ("REPORTS_EARNINGS", "Releases fundamental company information.", "CorporateIssuer", "InstitutionalInvestor"),
+                ("FORECASTS_POLICY", "Forecasts central-bank policy and rates.", "CentralBankWatcher", "MacroStrategist"),
+                ("ASSESSES_CREDIT", "Assesses credit risk and spreads.", "CreditAnalyst", "InstitutionalInvestor"),
+                ("FRAMES_MARKET", "Frames market narratives and sentiment.", "FinancialMedia", "Organization"),
+                ("REACTS_TO_SHOCK", "Changes positioning after a shock.", "InstitutionalInvestor", "MarketMaker"),
+            ]
+            summary = "Fallback market ontology for investors, liquidity, issuers, policy watchers, credit, macro strategy, and media."
+        elif domain == "business":
+            entity_types = [
+                ("ExecutiveTeam", "Decision makers setting company strategy."),
+                ("CustomerSegment", "Buyer group shaping demand and retention."),
+                ("Competitor", "Rival organization influencing market position."),
+                ("SalesLeader", "Actor translating strategy into revenue execution."),
+                ("ProductTeam", "Actor shaping roadmap, quality, and differentiation."),
+                ("ChannelPartner", "Distributor or partner affecting reach."),
+                ("IndustryAnalyst", "Expert interpreting market structure and demand."),
+                ("InvestorBoard", "Capital or governance actor shaping priorities."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("SETS_STRATEGY", "Sets strategic priorities and resource allocation.", "ExecutiveTeam", "Organization"),
+                ("BUYS_FROM", "Customer segment buys from a company.", "CustomerSegment", "Organization"),
+                ("COMPETES_WITH", "Competes against another organization.", "Competitor", "Organization"),
+                ("DRIVES_REVENUE", "Executes sales motion or pipeline strategy.", "SalesLeader", "CustomerSegment"),
+                ("BUILDS_PRODUCT", "Shapes product roadmap and capabilities.", "ProductTeam", "Organization"),
+                ("DISTRIBUTES_FOR", "Expands reach through channel activity.", "ChannelPartner", "Organization"),
+                ("ANALYZES_MARKET", "Analyzes market position or demand.", "IndustryAnalyst", "ExecutiveTeam"),
+                ("GOVERNS", "Provides governance or capital discipline.", "InvestorBoard", "ExecutiveTeam"),
+            ]
+            summary = "Fallback business-strategy ontology for executives, customers, competitors, sales, product, channels, analysts, and investors."
+        elif domain == "social":
+            entity_types = [
+                ("Influencer", "High-reach actor shaping attention and sentiment."),
+                ("CommunityGroup", "Public group with shared identity or interest."),
+                ("MediaOutlet", "Publisher framing public narratives."),
+                ("PlatformModerator", "Platform actor controlling visibility and rules."),
+                ("BrandActor", "Organization affected by public perception."),
+                ("CivilSocietyGroup", "Advocacy actor shaping public response."),
+                ("TrendAnalyst", "Actor interpreting sentiment and narrative velocity."),
+                ("EverydayParticipant", "Ordinary participant creating ground-level signal."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("AMPLIFIES_NARRATIVE", "Amplifies a public narrative or frame.", "Influencer", "CommunityGroup"),
+                ("REPORTS_ON", "Reports on an actor, event, or issue.", "MediaOutlet", "Organization"),
+                ("MODERATES_CONTENT", "Changes visibility or rules for content.", "PlatformModerator", "CommunityGroup"),
+                ("RESPONDS_TO_SENTIMENT", "Changes behavior based on public sentiment.", "BrandActor", "EverydayParticipant"),
+                ("ADVOCATES_FOR", "Advocates for a position or community.", "CivilSocietyGroup", "Organization"),
+                ("ANALYZES_TREND", "Analyzes sentiment or narrative movement.", "TrendAnalyst", "Organization"),
+                ("PARTICIPATES_IN", "Contributes to discourse or behavior.", "EverydayParticipant", "CommunityGroup"),
+                ("OPPOSES", "Publicly opposes an actor or position.", "CommunityGroup", "Organization"),
+            ]
+            summary = "Fallback social-narrative ontology for influencers, communities, media, platforms, brands, civil society, analysts, and participants."
+        elif domain == "macro":
             entity_types = [
                 ("CentralBankOfficial", "Central bank decision-maker or research staff."),
                 ("GovernmentEconomist", "Government analyst publishing economic assessments."),
