@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">HORIZON XL</div>
+        <div class="brand" @click="router.push('/')"><BrandMark /></div>
       </div>
       
       <div class="header-center">
@@ -76,6 +76,7 @@ import Step3Simulation from '../components/Step3Simulation.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, getSimulationConfig, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import BrandMark from '../components/BrandMark.vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -105,12 +106,14 @@ const currentStatus = ref('processing') // processing | completed | error
 const leftPanelStyle = computed(() => {
   if (viewMode.value === 'graph') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
   if (viewMode.value === 'workbench') return { width: '0%', opacity: 0, transform: 'translateX(-20px)' }
+  if (isSimulating.value) return { width: '46%', opacity: 1, transform: 'translateX(0)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
 
 const rightPanelStyle = computed(() => {
   if (viewMode.value === 'workbench') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
   if (viewMode.value === 'graph') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
+  if (isSimulating.value) return { width: '54%', opacity: 1, transform: 'translateX(0)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
 
@@ -449,4 +452,3 @@ onUnmounted(() => {
   border-right: 1px solid #EAEAEA;
 }
 </style>
-

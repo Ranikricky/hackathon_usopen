@@ -17,6 +17,7 @@ from . import graph_bp
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import GraphBuilderService
+from ..services.external_research import ExternalResearchService
 from ..services.text_processor import TextProcessor
 from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
@@ -497,6 +498,37 @@ def generate_ontology():
                     "filename": "prompt_input.txt",
                     "size": len(seed_text)
                 })
+
+        # External research is an additional evidence stream. It does not replace
+        # user-provided inputs; it becomes a provisional source packet that the
+        # ontology, graph, and later agents can audit and debate.
+        try:
+            research_packet = ExternalResearchService().collect(
+                prompt=simulation_requirement,
+                additional_context=additional_context,
+            )
+            research_markdown = research_packet.get("markdown") if isinstance(research_packet, dict) else ""
+            if research_markdown:
+                ProjectManager.save_external_research(project.project_id, research_packet)
+                project.external_research = {
+                    "enabled": True,
+                    "source_count": len(research_packet.get("sources", [])),
+                    "query_count": len(research_packet.get("queries", [])),
+                }
+                document_texts.append(research_markdown)
+                all_text += f"\n\n=== EXTERNAL_RESEARCH_PACKET ===\n{research_markdown}"
+                project.files.append({
+                    "filename": "external_research_packet.md",
+                    "size": len(research_markdown)
+                })
+                logger.info(
+                    "External research packet added. sources=%s queries=%s",
+                    project.external_research["source_count"],
+                    project.external_research["query_count"],
+                )
+        except Exception as research_exc:
+            # Research should improve grounding, not block prompt/file workflows.
+            logger.warning("External research discovery skipped: %s", research_exc)
         
         if not document_texts:
             ProjectManager.delete_project(project.project_id)
@@ -546,6 +578,7 @@ def generate_ontology():
                 "ontology": project.ontology,
                 "analysis_summary": project.analysis_summary,
                 "generation_seed": project.generation_seed,
+                "external_research": project.external_research,
                 "files": project.files,
                 "total_text_length": project.total_text_length
             }

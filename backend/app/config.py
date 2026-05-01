@@ -43,6 +43,14 @@ class Config:
     # Text processing.
     DEFAULT_CHUNK_SIZE = 500
     DEFAULT_CHUNK_OVERLAP = 50
+
+    # External research discovery.
+    # This feeds source packets into ontology, graph construction, and agent
+    # context. It is deliberately bounded so one prompt cannot turn into an
+    # unbounded crawler.
+    EXTERNAL_RESEARCH_ENABLED = os.environ.get('EXTERNAL_RESEARCH_ENABLED', 'true').lower() == 'true'
+    EXTERNAL_RESEARCH_MAX_QUERIES = int(os.environ.get('EXTERNAL_RESEARCH_MAX_QUERIES', '4'))
+    EXTERNAL_RESEARCH_MAX_RESULTS = int(os.environ.get('EXTERNAL_RESEARCH_MAX_RESULTS', '6'))
     
     # OASIS simulation.
     OASIS_DEFAULT_MAX_ROUNDS = int(os.environ.get('OASIS_DEFAULT_MAX_ROUNDS', '10'))

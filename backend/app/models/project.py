@@ -40,6 +40,7 @@ class Project:
     ontology: Optional[Dict[str, Any]] = None
     analysis_summary: Optional[str] = None
     generation_seed: Optional[str] = None
+    external_research: Optional[Dict[str, Any]] = None
     
     # 图谱信息（接口2完成后填充）
     graph_id: Optional[str] = None
@@ -66,6 +67,7 @@ class Project:
             "ontology": self.ontology,
             "analysis_summary": self.analysis_summary,
             "generation_seed": self.generation_seed,
+            "external_research": self.external_research,
             "graph_id": self.graph_id,
             "graph_build_task_id": self.graph_build_task_id,
             "simulation_requirement": self.simulation_requirement,
@@ -92,6 +94,7 @@ class Project:
             ontology=data.get('ontology'),
             analysis_summary=data.get('analysis_summary'),
             generation_seed=data.get('generation_seed'),
+            external_research=data.get('external_research'),
             graph_id=data.get('graph_id'),
             graph_build_task_id=data.get('graph_build_task_id'),
             simulation_requirement=data.get('simulation_requirement'),
@@ -131,6 +134,11 @@ class ProjectManager:
     def _get_project_text_path(cls, project_id: str) -> str:
         """获取项目提取文本存储路径"""
         return os.path.join(cls._get_project_dir(project_id), 'extracted_text.txt')
+
+    @classmethod
+    def _get_project_research_path(cls, project_id: str) -> str:
+        """获取项目外部研究包路径"""
+        return os.path.join(cls._get_project_dir(project_id), 'external_research.json')
 
     @classmethod
     def _get_project_local_graph_path(cls, project_id: str) -> str:
@@ -180,6 +188,23 @@ class ProjectManager:
         
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def save_external_research(cls, project_id: str, research: Dict[str, Any]) -> None:
+        """保存外部研究包。"""
+        project_dir = cls._get_project_dir(project_id)
+        os.makedirs(project_dir, exist_ok=True)
+        with open(cls._get_project_research_path(project_id), 'w', encoding='utf-8') as f:
+            json.dump(research, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def get_external_research(cls, project_id: str) -> Optional[Dict[str, Any]]:
+        """读取外部研究包。"""
+        path = cls._get_project_research_path(project_id)
+        if not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
     
     @classmethod
     def get_project(cls, project_id: str) -> Optional[Project]:

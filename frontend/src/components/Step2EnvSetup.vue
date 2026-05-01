@@ -1108,13 +1108,25 @@ onUnmounted(() => {
   padding: 20px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.04);
   border: 1px solid #EAEAEA;
-  transition: all 0.3s ease;
+  transition: transform 0.38s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
   position: relative;
+  transform-origin: center top;
+}
+
+.step-card:not(.active):not(.completed) {
+  opacity: 0.66;
+  transform: scale(0.986);
 }
 
 .step-card.active {
   border-color: #FF5722;
-  box-shadow: 0 4px 12px rgba(255, 87, 34, 0.08);
+  box-shadow: 0 18px 48px rgba(255, 87, 34, 0.12);
+  transform: scale(1.014);
+  z-index: 3;
+}
+
+.step-card.completed {
+  transform: scale(0.998);
 }
 
 .card-header {

@@ -36,6 +36,24 @@
             <span>{{ ontologyProgress.message || $t('step1.analyzingDocs') }}</span>
           </div>
 
+          <div v-if="!error && currentPhase === 0" class="focus-theatre ontology-theatre">
+            <div class="focus-copy">
+              <span class="focus-kicker">Live focus</span>
+              <strong>Finding the simulation actors</strong>
+              <p>The system is reading the prompt, detecting the domain, and turning the context into actor categories.</p>
+            </div>
+            <div class="phrase-stream">
+              <span
+                v-for="(phrase, idx) in ontologyPhraseList"
+                :key="phrase"
+                class="phrase-pill"
+                :style="{ '--delay': `${idx * 120}ms` }"
+              >
+                {{ phrase }}
+              </span>
+            </div>
+          </div>
+
           <!-- Detail Overlay -->
           <div v-if="selectedOntologyItem" class="ontology-detail-overlay">
             <div class="detail-header">
@@ -90,6 +108,7 @@
                 v-for="entity in projectData.ontology.entity_types" 
                 :key="entity.name" 
                 class="entity-tag clickable"
+                :style="{ '--delay': `${projectData.ontology.entity_types.indexOf(entity) * 70}ms` }"
                 @click="selectOntologyItem(entity, 'entity')"
               >
                 {{ entity.name }}
@@ -105,6 +124,7 @@
                 v-for="rel in projectData.ontology.edge_types" 
                 :key="rel.name" 
                 class="entity-tag clickable"
+                :style="{ '--delay': `${projectData.ontology.edge_types.indexOf(rel) * 70}ms` }"
                 @click="selectOntologyItem(rel, 'relation')"
               >
                 {{ rel.name }}
@@ -134,6 +154,27 @@
           <p class="description">
             {{ $t('step1.graphRagDesc') }}
           </p>
+
+          <div v-if="currentPhase === 1" class="focus-theatre graph-theatre">
+            <div class="focus-copy">
+              <span class="focus-kicker">Connection build</span>
+              <strong>Wiring actors into graph memory</strong>
+              <p>Nodes become participants, relationships become evidence paths, and the graph panel updates as the memory forms.</p>
+            </div>
+            <div class="connection-mini" aria-label="Graph connection preview">
+              <div
+                v-for="(node, idx) in connectionPreviewNodes"
+                :key="node"
+                class="mini-node"
+                :class="`mini-node-${idx}`"
+              >
+                {{ node }}
+              </div>
+              <span class="mini-link link-a"></span>
+              <span class="mini-link link-b"></span>
+              <span class="mini-link link-c"></span>
+            </div>
+          </div>
           
           <!-- Stats Cards -->
           <div class="stats-grid">
@@ -168,6 +209,13 @@
         <div class="card-content">
           <p class="api-note">POST /api/simulation/create</p>
           <p class="description">{{ $t('step1.buildCompleteDesc') }}</p>
+          <div v-if="currentPhase >= 2" class="focus-theatre complete-theatre">
+            <div class="focus-copy">
+              <span class="focus-kicker">Ready</span>
+              <strong>Graph memory established</strong>
+              <p>The next step creates the simulation environment and turns graph nodes into participant agents.</p>
+            </div>
+          </div>
           <button 
             class="action-btn" 
             :disabled="currentPhase < 2 || creatingSimulation"
@@ -220,6 +268,35 @@ defineEmits(['next-step', 'retry'])
 const selectedOntologyItem = ref(null)
 const logContent = ref(null)
 const creatingSimulation = ref(false)
+
+const ontologyPhraseList = computed(() => {
+  const entityTypes = props.projectData?.ontology?.entity_types || []
+  if (entityTypes.length) {
+    return entityTypes.slice(0, 8).map((entity) => {
+      const name = entity?.name || 'Actor'
+      return `Actor type: ${name}`
+    })
+  }
+
+  return [
+    'Reading prompt and source context',
+    'Detecting simulation domain',
+    'Separating actor categories from agents',
+    'Checking files, URLs, and web research',
+    'Drafting ontology schema',
+    'Preparing graph handoff',
+  ]
+})
+
+const connectionPreviewNodes = computed(() => {
+  const entityTypes = props.projectData?.ontology?.entity_types || []
+  const source = entityTypes.length ? entityTypes.map((entity) => entity?.name || 'Actor') : ['Prompt', 'Actors', 'Graph']
+  return source.slice(0, 3).map((name) => {
+    const words = String(name).replace(/([a-z])([A-Z])/g, '$1 $2').split(/\s+/).filter(Boolean)
+    const initials = words.map((word) => word[0]).join('')
+    return (initials || name).slice(0, 3).toUpperCase()
+  })
+})
 
 // Create a simulation and move to environment setup.
 const handleEnterEnvSetup = async () => {
@@ -310,13 +387,37 @@ watch(() => props.systemLogs.length, () => {
   box-shadow: 0 16px 44px rgba(34,31,25,0.06);
   border: 1px solid var(--hx-line);
   backdrop-filter: blur(16px);
-  transition: all 0.3s ease;
+  transition: transform 0.38s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
   position: relative; /* For absolute overlay */
+  transform-origin: center top;
+  will-change: transform;
+}
+
+.step-card:not(.active):not(.completed) {
+  opacity: 0.62;
+  transform: scale(0.985);
 }
 
 .step-card.active {
   border-color: rgba(23,107,135,0.36);
-  box-shadow: 0 18px 52px rgba(23,107,135,0.12);
+  box-shadow: 0 24px 70px rgba(23,107,135,0.16);
+  transform: scale(1.018);
+  z-index: 3;
+}
+
+.step-card.active::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(135deg, rgba(23,107,135,0.22), transparent 34%, rgba(192,139,92,0.18));
+  opacity: 0.22;
+  animation: focusGlow 2.8s ease-in-out infinite;
+}
+
+.step-card.completed {
+  transform: scale(0.998);
 }
 
 .card-header {
@@ -379,6 +480,127 @@ watch(() => props.systemLogs.length, () => {
   margin-bottom: 16px;
 }
 
+.focus-theatre {
+  margin: 14px 0 16px;
+  padding: 14px;
+  border: 1px solid rgba(23,107,135,0.14);
+  border-radius: var(--hx-radius-md);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.86), rgba(239,248,247,0.74)),
+    radial-gradient(circle at 82% 20%, rgba(192,139,92,0.14), transparent 16rem);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);
+  display: grid;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.focus-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.focus-kicker {
+  font-family: var(--hx-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--hx-accent);
+  font-weight: 700;
+}
+
+.focus-copy strong {
+  color: var(--hx-ink);
+  font-size: 13px;
+}
+
+.focus-copy p {
+  margin: 0;
+  color: var(--hx-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.phrase-stream {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.phrase-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.78);
+  border: 1px solid rgba(23,107,135,0.12);
+  color: rgba(17,19,22,0.74);
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0;
+  transform: translateY(10px) scale(0.96);
+  animation: phraseRise 0.52s ease forwards, phraseBreath 2.7s ease-in-out infinite;
+  animation-delay: var(--delay, 0ms), calc(var(--delay, 0ms) + 600ms);
+}
+
+.graph-theatre {
+  grid-template-columns: minmax(0, 1fr) 150px;
+  align-items: center;
+}
+
+.connection-mini {
+  position: relative;
+  width: 150px;
+  height: 106px;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(23,107,135,0.10), transparent 3.6rem),
+    radial-gradient(rgba(17,19,22,0.12) 1px, transparent 1px),
+    rgba(255,255,255,0.62);
+  background-size: auto, 16px 16px, auto;
+  overflow: hidden;
+}
+
+.mini-node {
+  position: absolute;
+  z-index: 2;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--hx-accent), var(--hx-accent-2));
+  color: white;
+  display: grid;
+  place-items: center;
+  font-family: var(--hx-font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  box-shadow: 0 12px 28px rgba(23,107,135,0.22);
+  animation: nodePulse 2.2s ease-in-out infinite;
+}
+
+.mini-node-0 { left: 14px; top: 18px; }
+.mini-node-1 { right: 14px; top: 16px; animation-delay: 0.2s; }
+.mini-node-2 { left: 54px; bottom: 12px; animation-delay: 0.4s; }
+
+.mini-link {
+  position: absolute;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(23,107,135,0.12), rgba(23,107,135,0.62), rgba(192,139,92,0.22));
+  transform-origin: left center;
+  animation: linkPulse 1.9s ease-in-out infinite;
+}
+
+.link-a { width: 74px; left: 48px; top: 38px; transform: rotate(-3deg); }
+.link-b { width: 58px; left: 38px; top: 62px; transform: rotate(50deg); animation-delay: 0.18s; }
+.link-c { width: 60px; left: 84px; top: 63px; transform: rotate(126deg); animation-delay: 0.32s; }
+
+.complete-theatre {
+  background:
+    linear-gradient(135deg, rgba(30,127,92,0.08), rgba(255,255,255,0.78)),
+    radial-gradient(circle at 86% 18%, rgba(30,127,92,0.12), transparent 12rem);
+}
+
 /* Step 01 Tags */
 .tags-container {
   margin-top: 12px;
@@ -413,6 +635,8 @@ watch(() => props.systemLogs.length, () => {
   color: var(--hx-ink);
   font-family: var(--hx-font-mono);
   transition: all 0.2s;
+  animation: riseIn 0.42s ease both;
+  animation-delay: var(--delay, 0ms);
 }
 
 .entity-tag.clickable {
@@ -697,6 +921,35 @@ watch(() => props.systemLogs.length, () => {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+@keyframes focusGlow {
+  0%, 100% { opacity: 0.14; }
+  50% { opacity: 0.34; }
+}
+
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes phraseRise {
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes phraseBreath {
+  0%, 100% { box-shadow: 0 0 0 rgba(23,107,135,0); }
+  50% { box-shadow: 0 10px 24px rgba(23,107,135,0.08); }
+}
+
+@keyframes nodePulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+@keyframes linkPulse {
+  0%, 100% { opacity: 0.42; }
+  50% { opacity: 1; }
+}
 
 /* System Logs */
 .system-logs {

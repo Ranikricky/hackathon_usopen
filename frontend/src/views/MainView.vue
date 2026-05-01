@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">HORIZON XL</div>
+        <div class="brand" @click="router.push('/')"><BrandMark /></div>
       </div>
       
       <div class="header-center">
@@ -88,6 +88,7 @@ import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, resetProject } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import BrandMark from '../components/BrandMark.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -120,12 +121,16 @@ let graphPollTimer = null
 const leftPanelStyle = computed(() => {
   if (viewMode.value === 'graph') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
   if (viewMode.value === 'workbench') return { width: '0%', opacity: 0, transform: 'translateX(-20px)' }
+  if (currentStep.value === 1 && currentPhase.value === 1) return { width: '54%', opacity: 1, transform: 'translateX(0)' }
+  if (currentStep.value === 1 && currentPhase.value === 0) return { width: '46%', opacity: 1, transform: 'translateX(0)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
 
 const rightPanelStyle = computed(() => {
   if (viewMode.value === 'workbench') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
   if (viewMode.value === 'graph') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
+  if (currentStep.value === 1 && currentPhase.value === 1) return { width: '46%', opacity: 1, transform: 'translateX(0)' }
+  if (currentStep.value === 1 && currentPhase.value === 0) return { width: '54%', opacity: 1, transform: 'translateX(0)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
 

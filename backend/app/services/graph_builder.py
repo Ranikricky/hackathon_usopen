@@ -197,7 +197,7 @@ class GraphBuilderService:
         self.client.graph.create(
             graph_id=graph_id,
             name=name,
-            description="Horizon XL Social Simulation Graph"
+            description="Horizon XL Future Simulation Graph"
         )
         
         return graph_id
@@ -503,4 +503,3 @@ class GraphBuilderService:
     def delete_graph(self, graph_id: str):
         """删除图谱"""
         self.client.graph.delete(graph_id=graph_id)
-

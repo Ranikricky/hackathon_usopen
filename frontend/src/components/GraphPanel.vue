@@ -1,5 +1,13 @@
 <template>
-  <div class="graph-panel">
+  <div
+    class="graph-panel"
+    :class="{
+      'is-building': currentPhase === 1,
+      'is-waiting': !graphData,
+      'has-graph': !!graphData,
+      'is-simulating': isSimulating
+    }"
+  >
     <div class="panel-header">
       <span class="panel-title">{{ $t('graph.panelTitle') }}</span>
       <!-- 顶部工具栏 (Internal Top Right) -->
@@ -210,6 +218,13 @@
       <div v-else class="graph-state">
         <div class="empty-icon">❖</div>
         <p class="empty-text">{{ $t('graph.waitingOntology') }}</p>
+        <div class="empty-connection-preview" aria-hidden="true">
+          <span class="empty-node node-a"></span>
+          <span class="empty-node node-b"></span>
+          <span class="empty-node node-c"></span>
+          <span class="empty-line line-a"></span>
+          <span class="empty-line line-b"></span>
+        </div>
       </div>
     </div>
 
@@ -824,6 +839,25 @@ onUnmounted(() => {
     rgba(251,250,247,0.64);
   background-size: auto, 28px 28px, auto;
   overflow: hidden;
+  transition: filter 0.35s ease, transform 0.35s ease;
+}
+
+.graph-panel.is-building,
+.graph-panel.is-simulating {
+  filter: saturate(1.08);
+}
+
+.graph-panel.is-building::after,
+.graph-panel.is-simulating::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(23,107,135,0.16), transparent 18rem),
+    linear-gradient(120deg, transparent 0%, rgba(255,255,255,0.26) 42%, transparent 64%);
+  opacity: 0.45;
+  animation: graphSweep 3.4s ease-in-out infinite;
 }
 
 .panel-header {
@@ -889,6 +923,21 @@ onUnmounted(() => {
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
+@keyframes graphSweep {
+  0%, 100% { opacity: 0.28; transform: translateX(-8%); }
+  50% { opacity: 0.52; transform: translateX(8%); }
+}
+
+@keyframes emptyNode {
+  0%, 100% { transform: scale(1); opacity: 0.56; }
+  50% { transform: scale(1.16); opacity: 0.95; }
+}
+
+@keyframes emptyLine {
+  0%, 100% { opacity: 0.28; }
+  50% { opacity: 0.78; }
+}
+
 .graph-container {
   width: 100%;
   height: 100%;
@@ -907,6 +956,7 @@ onUnmounted(() => {
   transform: translate(-50%, -50%);
   text-align: center;
   color: var(--hx-muted);
+  min-width: 260px;
 }
 
 .empty-icon {
@@ -914,6 +964,45 @@ onUnmounted(() => {
   margin-bottom: 16px;
   opacity: 0.2;
 }
+
+.empty-connection-preview {
+  position: relative;
+  width: 176px;
+  height: 118px;
+  margin: 20px auto 0;
+  border-radius: 30px;
+  background:
+    radial-gradient(circle at 50% 48%, rgba(23,107,135,0.08), transparent 4.2rem),
+    radial-gradient(rgba(17,19,22,0.1) 1px, transparent 1px);
+  background-size: auto, 18px 18px;
+  opacity: 0.9;
+}
+
+.empty-node {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(23,107,135,0.62), rgba(192,139,92,0.62));
+  box-shadow: 0 10px 22px rgba(23,107,135,0.12);
+  animation: emptyNode 2.6s ease-in-out infinite;
+}
+
+.node-a { left: 34px; top: 34px; }
+.node-b { right: 30px; top: 30px; animation-delay: 0.2s; }
+.node-c { left: 76px; bottom: 26px; animation-delay: 0.4s; }
+
+.empty-line {
+  position: absolute;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(23,107,135,0.28);
+  transform-origin: left center;
+  animation: emptyLine 2.4s ease-in-out infinite;
+}
+
+.line-a { width: 76px; left: 58px; top: 47px; transform: rotate(-3deg); }
+.line-b { width: 62px; left: 54px; top: 61px; transform: rotate(52deg); animation-delay: 0.25s; }
 
 /* Entity Types Legend - Bottom Left */
 .graph-legend {

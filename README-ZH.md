@@ -85,11 +85,11 @@ Horizon XL 致力于打造映射现实的群体智能镜像，通过捕捉个体
 
 ## 🔄 工作流程
 
-1. **图谱构建**：现实种子提取 & 个体与群体记忆注入 & GraphRAG构建
-2. **环境搭建**：实体关系抽取 & 人设生成 & 环境配置Agent注入仿真参数
-3. **开始模拟**：双平台并行模拟 & 自动解析预测需求 & 动态更新时序记忆
-4. **报告生成**：ReportAgent拥有丰富的工具集与模拟后环境进行深度交互
-5. **深度互动**：与模拟世界中的任意一位进行对话 & 与ReportAgent进行对话
+1. **Evidence Graph**: Prompt, file, URL, and web-research evidence become working graph memory
+2. **Agent Setup**: Entity relationship extraction, persona generation, and domain-specific agent configuration
+3. **Simulation**: Time-pocket simulation with agent debate, forecast revisions, and temporal memory updates
+4. **Output Generation**: Generate reports, tables, charts, and summaries from the same structured simulation state
+5. **Ask Simulation**: Chat with generated agents, the evidence trail, and the simulation state
 
 ## 🚀 快速开始
 

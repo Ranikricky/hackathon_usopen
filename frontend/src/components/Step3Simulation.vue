@@ -740,18 +740,23 @@ onUnmounted(() => {
   min-width: 140px;
   position: relative;
   cursor: pointer;
+  transform-origin: center;
 }
 
 .platform-status.active {
   opacity: 1;
   border-color: #333;
   background: #FFF;
+  transform: scale(1.045);
+  box-shadow: 0 16px 34px rgba(17, 19, 22, 0.12);
+  z-index: 2;
 }
 
 .platform-status.completed {
   opacity: 1;
   border-color: #1A936F;
   background: #F2FAF6;
+  transform: scale(0.995);
 }
 
 /* Actions Tooltip */

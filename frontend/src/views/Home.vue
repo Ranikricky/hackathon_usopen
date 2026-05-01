@@ -2,7 +2,7 @@
   <div class="home-container">
     <!-- 顶部导航栏 -->
     <nav class="navbar">
-      <div class="nav-brand">HORIZON XL</div>
+      <div class="nav-brand"><BrandMark /></div>
       <div class="nav-links">
         <LanguageSwitcher />
         <a href="https://github.com/" target="_blank" class="github-link">
@@ -46,7 +46,7 @@
           <div class="logo-container">
             <div class="hero-logo" aria-label="Horizon XL">
               <span class="hero-logo-kicker">Simulation Lab</span>
-              <span class="hero-logo-main">Horizon XL</span>
+              <span class="hero-logo-main"><BrandMark /></span>
             </div>
           </div>
           
@@ -219,6 +219,7 @@ import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import BrandMark from '../components/BrandMark.vue'
 
 const router = useRouter()
 

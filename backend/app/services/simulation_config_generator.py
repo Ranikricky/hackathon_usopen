@@ -99,7 +99,7 @@ class TimeSimulationConfig:
         "After each pocket, agent actions, relationships, forecasts, and observed outcomes "
         "become part of the next pocket's simulation state."
     )
-    pocket_reasoning: str = "Default hourly pockets for short-horizon social simulation."
+    pocket_reasoning: str = "Default hourly pockets for short-horizon future simulation."
     
     # 每小时激活的Agent数量范围
     agents_per_hour_min: int = 5
@@ -315,6 +315,12 @@ class SimulationConfigGenerator:
         report_progress(2, t('progress.generatingEventConfig'))
         event_config_result = self._generate_event_config(context, simulation_requirement, entities)
         event_config = self._parse_event_config(event_config_result)
+        event_config = self._inject_research_concern_posts(
+            event_config,
+            simulation_requirement,
+            document_text,
+            entities,
+        )
         reasoning_parts.append(f"{t('progress.eventConfigLabel')}: {event_config_result.get('reasoning', t('common.success'))}")
         
         # ========== 步骤3-N: 分批生成Agent配置 ==========
@@ -737,6 +743,8 @@ Return event configuration JSON only:
 - Extract hot-topic keywords.
 - Describe the likely narrative direction.
 - Design initial posts. Every post MUST include poster_type.
+- If the prompt asks for web scraping, latest news, articles, polling, or external research, create an initial evidence concern post that asks participant agents what source/data gap must be resolved before they update forecasts.
+- If ExternalResearchScout, DataRetrievalAnalyst, EvidenceAuditor, or QuantitativeSynthesizer appears in the available entity types, use one of those poster_type values for the evidence concern post.
 
 Important: poster_type must be selected from the available entity types above, so the post can be assigned to a matching agent.
 
@@ -773,6 +781,77 @@ JSON shape:
             hot_topics=result.get("hot_topics", []),
             narrative_direction=result.get("narrative_direction", "")
         )
+
+    def _inject_research_concern_posts(
+        self,
+        event_config: EventConfig,
+        simulation_requirement: str,
+        document_text: str,
+        entities: List[EntityNode],
+    ) -> EventConfig:
+        """Ensure external-research needs are explicitly presented to agents."""
+        text = f"{simulation_requirement or ''}\n{document_text or ''}".lower()
+        wants_external_research = any(
+            term in text
+            for term in [
+                "web scrape", "webscrape", "scrape", "latest", "news", "article",
+                "source", "poll", "survey", "external research", "fresh data",
+            ]
+        )
+        if not wants_external_research:
+            return event_config
+
+        existing = " ".join(str(post.get("content", "")) for post in event_config.initial_posts).lower()
+        if any(term in existing for term in ["source gap", "external evidence", "research gap", "data gap"]):
+            return event_config
+
+        available_types = [e.get_entity_type() or "Unknown" for e in entities]
+        preferred_types = [
+            "ExternalResearchScout",
+            "DataRetrievalAnalyst",
+            "EvidenceAuditor",
+            "QuantitativeSynthesizer",
+            "PollsterDataScientist",
+            "PollsterDataAnalyst",
+            "PoliticalJournalist",
+            "MediaOutlet",
+            "Journalist",
+        ]
+        poster_type = next(
+            (candidate for candidate in preferred_types if candidate in available_types),
+            available_types[0] if available_types else "Unknown",
+        )
+        event_config.initial_posts.insert(0, {
+            "content": (
+                "Before the next forecast update, identify the external evidence gaps. "
+                "The graph is working memory, not the final truth. "
+                "List which URLs, polls, news reports, datasets, dates, and numeric fields are needed, "
+                "which claims should be treated as weak until verified outside the graph, "
+                "and which new research pointers should be presented to participant agents in the next debate pocket."
+            ),
+            "poster_type": poster_type,
+        })
+        event_config.scheduled_events.append({
+            "event_type": "external_research_checkpoint",
+            "trigger": "before_each_major_forecast_revision",
+            "description": (
+                "Research and quantitative control agents should surface new web/source pointers, "
+                "truth-check graph claims, and ask participant agents whether the new evidence changes their forecast."
+            ),
+            "responsible_types": [
+                "ExternalResearchScout",
+                "DataRetrievalAnalyst",
+                "EvidenceAuditor",
+                "QuantitativeSynthesizer",
+            ],
+        })
+        if "external evidence gaps" not in [str(topic).lower() for topic in event_config.hot_topics]:
+            event_config.hot_topics.append("external evidence gaps")
+        if event_config.narrative_direction:
+            event_config.narrative_direction += " Evidence gaps must be surfaced before participant agents revise forecasts."
+        else:
+            event_config.narrative_direction = "Evidence gaps must be surfaced before participant agents revise forecasts."
+        return event_config
     
     def _assign_initial_post_agents(
         self,

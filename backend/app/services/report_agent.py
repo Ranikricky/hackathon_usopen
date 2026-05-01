@@ -29,6 +29,7 @@ from .zep_tools import (
     PanoramaResult,
     InterviewResult
 )
+from .external_research import ExternalResearchService
 from .simulation_manager import SimulationManager
 from .simulation_runner import SimulationRunner
 from .numeric_validation import NumericValidationService
@@ -907,6 +908,14 @@ what happened in pocket 1, how state carried into pocket 2, and so on.
 Best for: proving that a forecast path came from pocket-by-pocket simulation
 rather than interpolation or one-shot report writing."""
 
+TOOL_DESC_EXTERNAL_RESEARCH = """\
+[External Web Research - Dynamic Source Check]
+Runs bounded web discovery for blogs, Reddit discussions, news, papers, and
+literature pointers. Use it to challenge graph memory, find missing source
+pointers, and bring provisional outside evidence into the debate/report loop.
+Results are not treated as truth until audited for source quality and cutoff
+date leakage."""
+
 PLAN_SYSTEM_PROMPT = """\
 You are an expert forecast-report writer with a god's-eye view of the simulated world.
 You must write in English only.
@@ -1230,6 +1239,14 @@ class ReportAgent:
                     "interview_topic": "Interview topic or requirement",
                     "max_agents": "Maximum number of agents to interview, optional, default 5, max 10"
                 }
+            },
+            "external_web_research": {
+                "name": "external_web_research",
+                "description": TOOL_DESC_EXTERNAL_RESEARCH,
+                "parameters": {
+                    "query": "External research query or claim to check",
+                    "max_results": "Maximum number of source pointers to return, optional, default 5"
+                }
             }
         }
 
@@ -1425,6 +1442,24 @@ class ReportAgent:
                     "interviews": int(getattr(result, "interviewed_count", 0) or 0),
                 })
                 return result.to_text()
+
+            elif tool_name == "external_web_research":
+                query = parameters.get("query", "") or self.simulation_requirement
+                max_results = parameters.get("max_results", 5)
+                if isinstance(max_results, str):
+                    max_results = int(max_results)
+                service = ExternalResearchService(max_results=max(1, min(max_results, 10)))
+                packet = service.collect(prompt=query, additional_context=report_context)
+                sources = packet.get("sources", []) if isinstance(packet, dict) else []
+                self._last_tool_meta.update({
+                    "facts": len(sources),
+                    "entities": 0,
+                    "relationships": 0,
+                })
+                markdown = packet.get("markdown", "") if isinstance(packet, dict) else ""
+                if not markdown:
+                    return "External web research returned no source pointers. Treat this as a missing-evidence warning, not proof that no evidence exists."
+                return markdown
             
             # ========== 向后兼容的旧工具（内部重定向到新工具） ==========
             
@@ -1461,7 +1496,7 @@ class ReportAgent:
                 return json.dumps(result, ensure_ascii=False, indent=2)
             
             else:
-                return f"Unknown tool: {tool_name}. Use one of: time_pocket_timeline, insight_forge, panorama_search, quick_search, interview_agents"
+                return f"Unknown tool: {tool_name}. Use one of: time_pocket_timeline, insight_forge, panorama_search, quick_search, interview_agents, external_web_research"
                 
         except Exception as e:
             logger.error(t('report.toolExecFailed', toolName=tool_name, error=str(e)))

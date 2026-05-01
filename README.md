@@ -85,11 +85,11 @@ Click the image to watch Horizon XL's deep prediction of the lost ending based o
 
 ## 🔄 Workflow
 
-1. **Graph Building**: Seed extraction & Individual/collective memory injection & GraphRAG construction
-2. **Environment Setup**: Entity relationship extraction & Persona generation & Agent configuration injection
-3. **Simulation**: Dual-platform parallel simulation & Auto-parse prediction requirements & Dynamic temporal memory updates
-4. **Report Generation**: ReportAgent with rich toolset for deep interaction with post-simulation environment
-5. **Deep Interaction**: Chat with any agent in the simulated world & Interact with ReportAgent
+1. **Evidence Graph**: Prompt, file, URL, and web-research evidence become working graph memory
+2. **Agent Setup**: Entity relationship extraction, persona generation, and domain-specific agent configuration
+3. **Simulation**: Time-pocket simulation with agent debate, forecast revisions, and temporal memory updates
+4. **Output Generation**: Generate reports, tables, charts, and summaries from the same structured simulation state
+5. **Ask Simulation**: Chat with generated agents, the evidence trail, and the simulation state
 
 ## 🚀 Quick Start
 

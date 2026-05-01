@@ -327,14 +327,14 @@
                     </div>
                   </template>
 
-                  <!-- Report Complete -->
+                  <!-- Output Complete -->
                   <template v-if="log.action === 'report_complete'">
                     <div class="complete-banner">
                       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
                         <polyline points="22 4 12 14.01 9 11.01"></polyline>
                       </svg>
-                      <span>Report Generation Complete</span>
+                      <span>Output Generation Complete</span>
                     </div>
                   </template>
                 </div>
@@ -2426,6 +2426,24 @@ watch(() => props.reportId, (newId) => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  transition: transform 0.38s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.28s ease;
+  transform-origin: left top;
+}
+
+.report-section-item.is-pending {
+  opacity: 0.54;
+  transform: scale(0.992);
+}
+
+.report-section-item.is-active {
+  opacity: 1;
+  transform: scale(1.018);
+  z-index: 2;
+}
+
+.report-section-item.is-active .section-header-row {
+  background: linear-gradient(90deg, #F8FAFC, transparent);
+  box-shadow: inset 3px 0 0 #1F2937;
 }
 
 .section-header-row {

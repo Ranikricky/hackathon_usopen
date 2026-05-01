@@ -1,5 +1,5 @@
 <template>
-  <div class="interaction-panel">
+  <div class="interaction-panel" :class="{ 'is-chatting': isSending }">
     <!-- Main Split Layout -->
     <div class="main-split-layout">
       <!-- LEFT PANEL: Report Style -->
@@ -1089,6 +1089,24 @@ watch(() => props.simulationId, (newId) => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  transition: transform 0.38s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.28s ease;
+  transform-origin: left top;
+}
+
+.report-section-item.is-pending {
+  opacity: 0.58;
+  transform: scale(0.992);
+}
+
+.report-section-item.is-active {
+  opacity: 1;
+  transform: scale(1.016);
+  z-index: 2;
+}
+
+.report-section-item.is-active .section-header-row {
+  background: linear-gradient(90deg, #F8FAFC, transparent);
+  box-shadow: inset 3px 0 0 #1F2937;
 }
 
 .section-header-row {
@@ -1484,6 +1502,13 @@ watch(() => props.simulationId, (newId) => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: transform 0.34s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.28s ease;
+  transform-origin: center bottom;
+}
+
+.interaction-panel.is-chatting .chat-container {
+  transform: scale(1.012);
+  box-shadow: inset 0 0 0 1px rgba(31, 41, 55, 0.12), 0 18px 42px rgba(31, 41, 55, 0.08);
 }
 
 /* Report Agent Tools Card */

@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">HORIZON XL</div>
+        <div class="brand" @click="router.push('/')"><BrandMark /></div>
       </div>
       
       <div class="header-center">
@@ -73,6 +73,7 @@ import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import BrandMark from '../components/BrandMark.vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -436,4 +437,3 @@ onMounted(async () => {
   border-right: 1px solid #EAEAEA;
 }
 </style>
-

@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">HORIZON XL</div>
+        <div class="brand" @click="router.push('/')"><BrandMark /></div>
       </div>
       
       <div class="header-center">
@@ -73,6 +73,7 @@ import { getProject, getGraphData } from '../api/graph'
 import { getSimulation } from '../api/simulation'
 import { getReport, listReports } from '../api/report'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import BrandMark from '../components/BrandMark.vue'
 
 const route = useRoute()
 const router = useRouter()
