@@ -23,7 +23,7 @@ from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, get_locale, set_locale, t
 from .zep_entity_reader import EntityNode, ZepEntityReader
 
-logger = get_logger('mirofish.oasis_profile')
+logger = get_logger('horizonxl.oasis_profile')
 
 
 @dataclass
@@ -651,7 +651,7 @@ class OasisProfileGenerator:
         persona_match = re.search(r'"persona"\s*:\s*"([^"]*)', content)  # 可能被截断
         
         bio = bio_match.group(1) if bio_match else (entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}")
-        persona = persona_match.group(1) if persona_match else (entity_summary or f"{entity_name}是一个{entity_type}。")
+        persona = persona_match.group(1) if persona_match else (entity_summary or f"{entity_name} is a {entity_type}.")
         
         # 如果提取到了有意义的内容，标记为已修复
         if bio_match or persona_match:
@@ -666,12 +666,16 @@ class OasisProfileGenerator:
         logger.warning(f"JSON修复失败，返回基础结构")
         return {
             "bio": entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}",
-            "persona": entity_summary or f"{entity_name}是一个{entity_type}。"
+            "persona": entity_summary or f"{entity_name} is a {entity_type}."
         }
     
     def _get_system_prompt(self, is_individual: bool) -> str:
         """获取系统提示词"""
-        base_prompt = "你是社交媒体用户画像生成专家。生成详细、真实的人设用于舆论模拟,最大程度还原已有现实情况。必须返回有效的JSON格式，所有字符串值不能包含未转义的换行符。"
+        base_prompt = (
+            "You are an expert social-media persona designer for simulation. "
+            "Generate detailed, realistic English personas grounded in the provided context. "
+            "Return valid JSON only, and do not include unescaped line breaks inside string values."
+        )
         return f"{base_prompt}\n\n{get_language_instruction()}"
     
     def _build_individual_persona_prompt(
@@ -684,43 +688,36 @@ class OasisProfileGenerator:
     ) -> str:
         """构建个人实体的详细人设提示词"""
         
-        attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "无"
-        context_str = context[:3000] if context else "无额外上下文"
+        attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "None"
+        context_str = context[:3000] if context else "No extra context"
         
-        return f"""为实体生成详细的社交媒体用户人设,最大程度还原已有现实情况。
+        return f"""Generate a detailed social-media persona for this entity.
 
-实体名称: {entity_name}
-实体类型: {entity_type}
-实体摘要: {entity_summary}
-实体属性: {attrs_str}
+Entity name: {entity_name}
+Entity type: {entity_type}
+Entity summary: {entity_summary}
+Entity attributes: {attrs_str}
 
-上下文信息:
+Context:
 {context_str}
 
-请生成JSON，包含以下字段:
+Return JSON with these fields:
+1. bio: English social-media bio, about 200 characters.
+2. persona: Detailed English persona in one plain-text paragraph, covering background, profession, education, location, personality, social-media style, viewpoint, unique traits, and relevant memories.
+3. age: integer age.
+4. gender: English string, either "male" or "female".
+5. mbti: MBTI type such as INTJ or ENFP.
+6. country: English country or region name.
+7. profession: English profession.
+8. interested_topics: English array of topics.
 
-1. bio: 社交媒体简介，200字
-2. persona: 详细人设描述（2000字的纯文本），需包含:
-   - 基本信息（年龄、职业、教育背景、所在地）
-   - 人物背景（重要经历、与事件的关联、社会关系）
-   - 性格特征（MBTI类型、核心性格、情绪表达方式）
-   - 社交媒体行为（发帖频率、内容偏好、互动风格、语言特点）
-   - 立场观点（对话题的态度、可能被激怒/感动的内容）
-   - 独特特征（口头禅、特殊经历、个人爱好）
-   - 个人记忆（人设的重要部分，要介绍这个个体与事件的关联，以及这个个体在事件中的已有动作与反应）
-3. age: 年龄数字（必须是整数）
-4. gender: 性别，必须是英文: "male" 或 "female"
-5. mbti: MBTI类型（如INTJ、ENFP等）
-6. country: 国家（使用中文，如"中国"）
-7. profession: 职业
-8. interested_topics: 感兴趣话题数组
-
-重要:
-- 所有字段值必须是字符串或数字，不要使用换行符
-- persona必须是一段连贯的文字描述
-- {get_language_instruction()} (gender字段必须用英文male/female)
-- 内容要与实体信息保持一致
-- age必须是有效的整数，gender必须是"male"或"female"
+Important:
+- All string values must be English only.
+- Use strings or numbers only; do not use line breaks inside strings.
+- The persona must be one coherent paragraph.
+- {get_language_instruction()}
+- Keep the content consistent with the entity.
+- age must be a valid integer, gender must be "male" or "female".
 """
 
     def _build_group_persona_prompt(
@@ -733,43 +730,36 @@ class OasisProfileGenerator:
     ) -> str:
         """构建群体/机构实体的详细人设提示词"""
         
-        attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "无"
-        context_str = context[:3000] if context else "无额外上下文"
+        attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "None"
+        context_str = context[:3000] if context else "No extra context"
         
-        return f"""为机构/群体实体生成详细的社交媒体账号设定,最大程度还原已有现实情况。
+        return f"""Generate a detailed social-media account persona for this organization or group.
 
-实体名称: {entity_name}
-实体类型: {entity_type}
-实体摘要: {entity_summary}
-实体属性: {attrs_str}
+Entity name: {entity_name}
+Entity type: {entity_type}
+Entity summary: {entity_summary}
+Entity attributes: {attrs_str}
 
-上下文信息:
+Context:
 {context_str}
 
-请生成JSON，包含以下字段:
+Return JSON with these fields:
+1. bio: English official-account bio, about 200 characters, professional tone.
+2. persona: Detailed English account persona in one plain-text paragraph, covering institution background, account role, audience, voice, posting style, stance, operating habits, and relevant memories.
+3. age: integer 30.
+4. gender: English string "other".
+5. mbti: MBTI type describing communication style.
+6. country: English country or region name.
+7. profession: English institutional function.
+8. interested_topics: English array of topics.
 
-1. bio: 官方账号简介，200字，专业得体
-2. persona: 详细账号设定描述（2000字的纯文本），需包含:
-   - 机构基本信息（正式名称、机构性质、成立背景、主要职能）
-   - 账号定位（账号类型、目标受众、核心功能）
-   - 发言风格（语言特点、常用表达、禁忌话题）
-   - 发布内容特点（内容类型、发布频率、活跃时间段）
-   - 立场态度（对核心话题的官方立场、面对争议的处理方式）
-   - 特殊说明（代表的群体画像、运营习惯）
-   - 机构记忆（机构人设的重要部分，要介绍这个机构与事件的关联，以及这个机构在事件中的已有动作与反应）
-3. age: 固定填30（机构账号的虚拟年龄）
-4. gender: 固定填"other"（机构账号使用other表示非个人）
-5. mbti: MBTI类型，用于描述账号风格，如ISTJ代表严谨保守
-6. country: 国家（使用中文，如"中国"）
-7. profession: 机构职能描述
-8. interested_topics: 关注领域数组
-
-重要:
-- 所有字段值必须是字符串或数字，不允许null值
-- persona必须是一段连贯的文字描述，不要使用换行符
-- {get_language_instruction()} (gender字段必须用英文"other")
-- age必须是整数30，gender必须是字符串"other"
-- 机构账号发言要符合其身份定位"""
+Important:
+- All string values must be English only.
+- Use strings or numbers only; null values are not allowed.
+- The persona must be one coherent paragraph with no line breaks.
+- {get_language_instruction()}
+- age must be integer 30, gender must be "other".
+- The account voice must fit the organization or group."""
     
     def _generate_profile_rule_based(
         self,
@@ -814,7 +804,7 @@ class OasisProfileGenerator:
                 "age": 30,  # 机构虚拟年龄
                 "gender": "other",  # 机构使用other
                 "mbti": "ISTJ",  # 机构风格：严谨保守
-                "country": "中国",
+                "country": "United States",
                 "profession": "Media",
                 "interested_topics": ["General News", "Current Events", "Public Affairs"],
             }
@@ -826,7 +816,7 @@ class OasisProfileGenerator:
                 "age": 30,  # 机构虚拟年龄
                 "gender": "other",  # 机构使用other
                 "mbti": "ISTJ",  # 机构风格：严谨保守
-                "country": "中国",
+                "country": "United States",
                 "profession": entity_type,
                 "interested_topics": ["Public Policy", "Community", "Official Announcements"],
             }
@@ -1202,4 +1192,3 @@ class OasisProfileGenerator:
         """[已废弃] 请使用 save_profiles() 方法"""
         logger.warning("save_profiles_to_json已废弃，请使用save_profiles方法")
         self.save_profiles(profiles, file_path, platform)
-

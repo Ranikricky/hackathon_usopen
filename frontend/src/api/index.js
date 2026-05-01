@@ -3,7 +3,7 @@ import i18n from '../i18n'
 
 // 创建axios实例
 const service = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '',
   timeout: 300000, // 5分钟超时（本体生成可能需要较长时间）
   headers: {
     'Content-Type': 'application/json'
@@ -58,6 +58,11 @@ export const requestWithRetry = async (requestFn, maxRetries = 3, delay = 1000) 
     try {
       return await requestFn()
     } catch (error) {
+      const status = error?.response?.status
+      // 客户端错误（4xx）通常不可重试，429 除外
+      if (status && status >= 400 && status < 500 && status !== 429) {
+        throw error
+      }
       if (i === maxRetries - 1) throw error
       
       console.warn(`Request failed, retrying (${i + 1}/${maxRetries})...`)

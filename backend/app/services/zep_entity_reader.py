@@ -12,8 +12,9 @@ from zep_cloud.client import Zep
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
+from ..models.project import ProjectManager
 
-logger = get_logger('mirofish.zep_entity_reader')
+logger = get_logger('horizonxl.zep_entity_reader')
 
 # 用于泛型返回类型
 T = TypeVar('T')
@@ -80,10 +81,20 @@ class ZepEntityReader:
     
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or Config.ZEP_API_KEY
-        if not self.api_key:
+        self.client = Zep(api_key=self.api_key) if self.api_key else None
+
+    def _is_local_graph(self, graph_id: str) -> bool:
+        return bool(graph_id and graph_id.startswith("local_"))
+
+    def _require_client(self):
+        if not self.client:
             raise ValueError("ZEP_API_KEY 未配置")
-        
-        self.client = Zep(api_key=self.api_key)
+
+    def _get_local_graph_data(self, graph_id: str) -> Dict[str, Any]:
+        graph_data = ProjectManager.get_local_graph_by_graph_id(graph_id)
+        if not graph_data:
+            raise ValueError(f"本地图谱不存在: {graph_id}")
+        return graph_data
     
     def _call_with_retry(
         self, 
@@ -136,6 +147,23 @@ class ZepEntityReader:
         """
         logger.info(f"获取图谱 {graph_id} 的所有节点...")
 
+        if self._is_local_graph(graph_id):
+            graph_data = self._get_local_graph_data(graph_id)
+            nodes = graph_data.get("nodes", []) or []
+            nodes_data = []
+            for node in nodes:
+                nodes_data.append({
+                    "uuid": node.get("uuid", ""),
+                    "name": node.get("name", ""),
+                    "labels": node.get("labels", []) or [],
+                    "summary": node.get("summary", "") or "",
+                    "attributes": node.get("attributes", {}) or {},
+                })
+            logger.info(f"本地图谱节点数: {len(nodes_data)}")
+            return nodes_data
+
+        self._require_client()
+
         nodes = fetch_all_nodes(self.client, graph_id)
 
         nodes_data = []
@@ -162,6 +190,24 @@ class ZepEntityReader:
             边列表
         """
         logger.info(f"获取图谱 {graph_id} 的所有边...")
+
+        if self._is_local_graph(graph_id):
+            graph_data = self._get_local_graph_data(graph_id)
+            edges = graph_data.get("edges", []) or []
+            edges_data = []
+            for edge in edges:
+                edges_data.append({
+                    "uuid": edge.get("uuid", ""),
+                    "name": edge.get("name", "") or edge.get("fact_type", ""),
+                    "fact": edge.get("fact", ""),
+                    "source_node_uuid": edge.get("source_node_uuid", ""),
+                    "target_node_uuid": edge.get("target_node_uuid", ""),
+                    "attributes": edge.get("attributes", {}) or {},
+                })
+            logger.info(f"本地图谱边数: {len(edges_data)}")
+            return edges_data
+
+        self._require_client()
 
         edges = fetch_all_edges(self.client, graph_id)
 
@@ -190,6 +236,7 @@ class ZepEntityReader:
             边列表
         """
         try:
+            self._require_client()
             # 使用重试机制调用Zep API
             edges = self._call_with_retry(
                 func=lambda: self.client.graph.node.get_entity_edges(node_uuid=node_uuid),
@@ -346,6 +393,56 @@ class ZepEntityReader:
             EntityNode或None
         """
         try:
+            if self._is_local_graph(graph_id):
+                all_nodes = self.get_all_nodes(graph_id)
+                all_edges = self.get_all_edges(graph_id)
+                node_map = {n["uuid"]: n for n in all_nodes}
+                node = node_map.get(entity_uuid)
+                if not node:
+                    return None
+
+                related_edges = []
+                related_node_uuids = set()
+                for edge in all_edges:
+                    if edge.get("source_node_uuid") == entity_uuid:
+                        related_edges.append({
+                            "direction": "outgoing",
+                            "edge_name": edge.get("name", ""),
+                            "fact": edge.get("fact", ""),
+                            "target_node_uuid": edge.get("target_node_uuid"),
+                        })
+                        related_node_uuids.add(edge.get("target_node_uuid"))
+                    elif edge.get("target_node_uuid") == entity_uuid:
+                        related_edges.append({
+                            "direction": "incoming",
+                            "edge_name": edge.get("name", ""),
+                            "fact": edge.get("fact", ""),
+                            "source_node_uuid": edge.get("source_node_uuid"),
+                        })
+                        related_node_uuids.add(edge.get("source_node_uuid"))
+
+                related_nodes = []
+                for related_uuid in related_node_uuids:
+                    related_node = node_map.get(related_uuid)
+                    if related_node:
+                        related_nodes.append({
+                            "uuid": related_node["uuid"],
+                            "name": related_node["name"],
+                            "labels": related_node["labels"],
+                            "summary": related_node.get("summary", ""),
+                        })
+
+                return EntityNode(
+                    uuid=node.get("uuid", ""),
+                    name=node.get("name", ""),
+                    labels=node.get("labels", []) or [],
+                    summary=node.get("summary", "") or "",
+                    attributes=node.get("attributes", {}) or {},
+                    related_edges=related_edges,
+                    related_nodes=related_nodes,
+                )
+
+            self._require_client()
             # 使用重试机制获取节点
             node = self._call_with_retry(
                 func=lambda: self.client.graph.node.get(uuid_=entity_uuid),
@@ -433,5 +530,4 @@ class ZepEntityReader:
             enrich_with_edges=enrich_with_edges
         )
         return result.entities
-
 

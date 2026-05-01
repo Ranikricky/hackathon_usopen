@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">MIROFISH</div>
+        <div class="brand" @click="router.push('/')">HORIZON XL</div>
       </div>
       
       <div class="header-center">
@@ -50,7 +50,7 @@
 
       <!-- Right Panel: Step Components -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
-        <!-- Step 1: 图谱构建 -->
+        <!-- Step 1: Graph Build -->
         <Step1GraphBuild 
           v-if="currentStep === 1"
           :currentPhase="currentPhase"
@@ -58,10 +58,12 @@
           :ontologyProgress="ontologyProgress"
           :buildProgress="buildProgress"
           :graphData="graphData"
+          :error="error"
           :systemLogs="systemLogs"
           @next-step="handleNextStep"
+          @retry="retryCurrentStep"
         />
-        <!-- Step 2: 环境搭建 -->
+        <!-- Step 2: Environment Setup -->
         <Step2EnvSetup
           v-else-if="currentStep === 2"
           :projectData="projectData"
@@ -95,7 +97,7 @@ const { t, tm } = useI18n()
 const viewMode = ref('split') // graph | split | workbench
 
 // Step State
-const currentStep = ref(1) // 1: 图谱构建, 2: 环境搭建, 3: 开始模拟, 4: 报告生成, 5: 深度互动
+const currentStep = ref(1) // 1: Graph Build, 2: Environment Setup, 3: Simulation, 4: Report, 5: Interaction
 const stepNames = computed(() => tm('main.stepNames'))
 
 // Data State
@@ -152,6 +154,10 @@ const addLog = (msg) => {
   }
 }
 
+const getApiErrorMessage = (err, fallback = 'Request failed') => {
+  return err?.response?.data?.error || err?.message || fallback
+}
+
 // --- Layout Methods ---
 const toggleMaximize = (target) => {
   if (viewMode.value === target) {
@@ -166,7 +172,7 @@ const handleNextStep = (params = {}) => {
     currentStep.value++
     addLog(t('log.enterStep', { step: currentStep.value, name: stepNames.value[currentStep.value - 1] }))
     
-    // 如果是从 Step 2 进入 Step 3，记录模拟轮数配置
+    // If Step 2 moves into Step 3, record the simulation round configuration.
     if (currentStep.value === 3 && params.maxRounds) {
       addLog(t('log.customSimRounds', { rounds: params.maxRounds }))
     }
@@ -177,6 +183,21 @@ const handleGoBack = () => {
   if (currentStep.value > 1) {
     currentStep.value--
     addLog(t('log.returnToStep', { step: currentStep.value, name: stepNames.value[currentStep.value - 1] }))
+  }
+}
+
+const retryCurrentStep = async () => {
+  const projectId = currentProjectId.value
+  error.value = ''
+  ontologyProgress.value = null
+  buildProgress.value = null
+  stopPolling()
+  stopGraphPolling()
+
+  if (projectId === 'new') {
+    await handleNewProject()
+  } else {
+    await loadProject()
   }
 }
 
@@ -193,20 +214,22 @@ const initProject = async () => {
 
 const handleNewProject = async () => {
   const pending = getPendingUpload()
-  if (!pending.isPending || pending.files.length === 0) {
-    error.value = 'No pending files found.'
-    addLog('Error: No pending files found for new project.')
+  if (!pending.isPending) {
+    error.value = 'No pending project input found.'
+    addLog('Error: No pending project input found for new project.')
     return
   }
   
   try {
     loading.value = true
     currentPhase.value = 0
-    ontologyProgress.value = { message: 'Uploading and analyzing docs...' }
-    addLog('Starting ontology generation: Uploading files...')
+    ontologyProgress.value = { message: 'Preparing project input...' }
+    addLog('Starting ontology generation with pending project input...')
     
     const formData = new FormData()
-    pending.files.forEach(f => formData.append('files', f))
+    if (Array.isArray(pending.files)) {
+      pending.files.forEach(f => formData.append('files', f))
+    }
     formData.append('simulation_requirement', pending.simulationRequirement)
     
     const res = await generateOntology(formData)
@@ -224,8 +247,9 @@ const handleNewProject = async () => {
       addLog(`Error generating ontology: ${error.value}`)
     }
   } catch (err) {
-    error.value = err.message
-    addLog(`Exception in handleNewProject: ${err.message}`)
+    const msg = getApiErrorMessage(err, 'Ontology generation failed')
+    error.value = msg
+    addLog(`Exception in handleNewProject: ${msg}`)
   } finally {
     loading.value = false
   }
@@ -256,8 +280,9 @@ const loadProject = async () => {
       addLog(`Error loading project: ${res.error}`)
     }
   } catch (err) {
-    error.value = err.message
-    addLog(`Exception in loadProject: ${err.message}`)
+    const msg = getApiErrorMessage(err, 'Failed to load project')
+    error.value = msg
+    addLog(`Exception in loadProject: ${msg}`)
   } finally {
     loading.value = false
   }
@@ -289,8 +314,9 @@ const startBuildGraph = async () => {
       addLog(`Error starting build: ${res.error}`)
     }
   } catch (err) {
-    error.value = err.message
-    addLog(`Exception in startBuildGraph: ${err.message}`)
+    const msg = getApiErrorMessage(err, 'Failed to start graph build')
+    error.value = msg
+    addLog(`Exception in startBuildGraph: ${msg}`)
   }
 }
 
@@ -350,6 +376,7 @@ const pollTaskStatus = async (taskId) => {
         }
       } else if (task.status === 'failed') {
         stopPolling()
+        stopGraphPolling()
         error.value = task.error
         addLog(`Graph build task failed: ${task.error}`)
       }

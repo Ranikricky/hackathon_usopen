@@ -11,13 +11,101 @@ from flask import request, jsonify, send_file
 from . import report_bp
 from ..config import Config
 from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
-from ..services.simulation_manager import SimulationManager
+from ..services.simulation_manager import SimulationManager, SimulationStatus
+from ..services.simulation_runner import SimulationRunner
+from ..services.zep_tools import ZepToolsService
+from ..services.numeric_validation import NumericValidationService
 from ..models.project import ProjectManager
+from ..models.simulation_state import SimulationStateManager
 from ..models.task import TaskManager, TaskStatus
 from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
 
-logger = get_logger('mirofish.api.report')
+logger = get_logger('horizonxl.api.report')
+
+
+def _evaluate_report_readiness(state, graph_id: str) -> dict:
+    """Check whether the evidence pipeline is healthy enough to generate a report."""
+    failures = []
+    warnings = []
+    metrics = {
+        "graph_nodes": 0,
+        "graph_edges": 0,
+        "profiles": int(state.profiles_count or 0),
+        "config_generated": bool(state.config_generated),
+        "simulation_status": state.status.value if hasattr(state.status, "value") else str(state.status),
+        "simulation_actions": 0,
+        "active_agents": 0,
+        "env_alive": False,
+        "pocket_unit_label": None,
+        "total_pockets": 0,
+        "pocket_duration_minutes": 0,
+        "simulated_pockets_with_actions": 0,
+    }
+
+    try:
+        tools = ZepToolsService()
+        metrics["graph_nodes"] = len(tools.get_all_nodes(graph_id))
+        metrics["graph_edges"] = len(tools.get_all_edges(graph_id))
+    except Exception as exc:
+        failures.append(f"Graph search is unavailable: {exc}")
+
+    try:
+        actions = SimulationRunner.get_all_actions(state.simulation_id)
+        metrics["simulation_actions"] = len(actions)
+        metrics["active_agents"] = len({
+            action.agent_id for action in actions
+            if getattr(action, "agent_id", None) is not None
+        })
+        config = SimulationManager().get_simulation_config(state.simulation_id) or {}
+        time_config = config.get("time_config", {}) or {}
+        metrics["pocket_unit_label"] = time_config.get("pocket_unit_label")
+        metrics["total_pockets"] = int(time_config.get("total_pockets", 0) or 0)
+        metrics["pocket_duration_minutes"] = int(time_config.get("pocket_duration_minutes", 0) or 0)
+        rounds_per_pocket = max(1, int(time_config.get("rounds_per_pocket", 1) or 1))
+        metrics["simulated_pockets_with_actions"] = len({
+            ((action.round_num - 1) // rounds_per_pocket) + 1
+            for action in actions
+            if getattr(action, "round_num", 0) and action.round_num > 0
+        })
+    except Exception as exc:
+        warnings.append(f"Could not inspect simulation action logs: {exc}")
+
+    try:
+        metrics["env_alive"] = bool(SimulationRunner.check_env_alive(state.simulation_id))
+    except Exception:
+        metrics["env_alive"] = False
+
+    if metrics["graph_nodes"] < 3:
+        failures.append("Graph memory is too small: fewer than 3 nodes were found.")
+    if metrics["graph_edges"] < 3:
+        failures.append("Graph memory is too small: fewer than 3 relationship facts were found.")
+    if metrics["profiles"] < 1:
+        failures.append("No agent profiles are available; prepare the simulation environment first.")
+    if not metrics["config_generated"]:
+        failures.append("Simulation configuration has not been generated.")
+    if state.status in {SimulationStatus.CREATED, SimulationStatus.PREPARING, SimulationStatus.FAILED}:
+        failures.append(f"Simulation status is '{metrics['simulation_status']}', not ready for report generation.")
+    if metrics["simulation_actions"] < 1:
+        failures.append("No simulation actions were found; run the simulation before generating a report.")
+    if metrics["active_agents"] < 1:
+        failures.append("No active simulated agents were found in the action logs.")
+    if not metrics["pocket_unit_label"] or metrics["total_pockets"] < 1:
+        warnings.append("No explicit time-pocket plan was found; regenerate simulation config for pocket-by-pocket simulation metadata.")
+    if metrics["simulation_actions"] > 0 and metrics["simulated_pockets_with_actions"] < 1:
+        warnings.append("Simulation actions exist but could not be mapped to time pockets.")
+    if not metrics["env_alive"]:
+        warnings.append(
+            "The live simulation environment is not running, so fresh agent interviews may fail. "
+            "Reports can still use saved action logs if they exist."
+        )
+
+    return {
+        "ready": not failures,
+        "metrics": metrics,
+        "failures": failures,
+        "warnings": warnings,
+    }
 
 
 # ============== 报告生成接口 ==============
@@ -58,6 +146,7 @@ def generate_report():
             }), 400
 
         force_regenerate = data.get('force_regenerate', False)
+        bypass_readiness = data.get('bypass_readiness', False)
         
         # 获取模拟信息
         manager = SimulationManager()
@@ -105,6 +194,64 @@ def generate_report():
                 "success": False,
                 "error": t('api.missingSimRequirement')
             }), 400
+
+        structured_state = SimulationStateManager.load(simulation_id)
+        validator = NumericValidationService()
+        if not structured_state:
+            validation = {
+                "passed": False,
+                "errors": ["Structured simulation state is missing."],
+                "warnings": [],
+                "missing_agents": [],
+                "missing_variables": [],
+                "missing_dates": [],
+                "missing_scenarios": [],
+                "numeric_quality_score": 0.0,
+            }
+            if not bypass_readiness:
+                return jsonify({
+                    "success": False,
+                    "error": "Simulation evidence insufficient",
+                    "diagnostic": validator.diagnostic_message(validation),
+                    "next_steps": [
+                        "Create or repair the structured simulation state before generating a report.",
+                        "Call POST /api/simulation/plan to create a domain plan.",
+                        "Create a new simulation or call the structured simulation flow so structured_state.json is persisted.",
+                        "Run numeric validation again before retrying report generation.",
+                        "For debugging only, send bypass_readiness=true to force legacy report generation."
+                    ]
+                }), 409
+        else:
+            validation = validator.validate(structured_state.to_dict())
+            SimulationStateManager.update_validation(simulation_id, validation)
+            if not validation["passed"] and not bypass_readiness:
+                return jsonify({
+                    "success": False,
+                    "error": "Simulation evidence insufficient",
+                    "diagnostic": validator.diagnostic_message(validation),
+                    "next_steps": [
+                        "Run the structured simulation until required agents emit numeric forecast paths.",
+                        "Each forecast point must include date, value, unit, scenario, agent, and confidence.",
+                        "Ensure required target variables and base/upside/downside/tail scenario paths are complete.",
+                        "Retry report generation after GET /api/simulation/validation/<simulation_id> passes.",
+                        "For debugging only, send bypass_readiness=true to force legacy report generation."
+                    ]
+                }), 409
+
+        readiness = _evaluate_report_readiness(state, graph_id)
+        if not readiness["ready"] and not bypass_readiness:
+            return jsonify({
+                "success": False,
+                "error": "Report generation blocked because the simulation evidence pipeline is not ready.",
+                "readiness": readiness,
+                "next_steps": [
+                    "Build a graph with enough entities and relationship facts.",
+                    "Prepare the simulation environment so agent profiles and config are generated.",
+                    "Run the simulation until it produces agent actions.",
+                    "Retry report generation after the readiness checks pass.",
+                    "For debugging only, send bypass_readiness=true to force report generation."
+                ]
+            }), 409
         
         # 提前生成 report_id，以便立即返回给前端
         import uuid
@@ -117,7 +264,9 @@ def generate_report():
             metadata={
                 "simulation_id": simulation_id,
                 "graph_id": graph_id,
-                "report_id": report_id
+                "report_id": report_id,
+                "readiness": readiness,
+                "bypass_readiness": bypass_readiness,
             }
         )
         
@@ -153,7 +302,8 @@ def generate_report():
                 # 生成报告（传入预先生成的 report_id）
                 report = agent.generate_report(
                     progress_callback=progress_callback,
-                    report_id=report_id
+                    report_id=report_id,
+                    bypass_validation=bypass_readiness
                 )
                 
                 # 保存报告
@@ -939,7 +1089,7 @@ def search_graph_tool():
     
     请求（JSON）：
         {
-            "graph_id": "mirofish_xxxx",
+            "graph_id": "horizonxl_xxxx",
             "query": "搜索查询",
             "limit": 10
         }
@@ -987,7 +1137,7 @@ def get_graph_statistics_tool():
     
     请求（JSON）：
         {
-            "graph_id": "mirofish_xxxx"
+            "graph_id": "horizonxl_xxxx"
         }
     """
     try:

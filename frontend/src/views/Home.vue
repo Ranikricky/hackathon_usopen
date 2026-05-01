@@ -2,10 +2,10 @@
   <div class="home-container">
     <!-- 顶部导航栏 -->
     <nav class="navbar">
-      <div class="nav-brand">MIROFISH</div>
+      <div class="nav-brand">HORIZON XL</div>
       <div class="nav-links">
         <LanguageSwitcher />
-        <a href="https://github.com/666ghj/MiroFish" target="_blank" class="github-link">
+        <a href="https://github.com/" target="_blank" class="github-link">
           {{ $t('nav.visitGithub') }} <span class="arrow">↗</span>
         </a>
       </div>
@@ -44,7 +44,10 @@
         <div class="hero-right">
           <!-- Logo 区域 -->
           <div class="logo-container">
-            <img src="../assets/logo/MiroFish_logo_left.jpeg" alt="MiroFish Logo" class="hero-logo" />
+            <div class="hero-logo" aria-label="Horizon XL">
+              <span class="hero-logo-kicker">Simulation Lab</span>
+              <span class="hero-logo-main">Horizon XL</span>
+            </div>
           </div>
           
           <button class="scroll-down-btn" @click="scrollToBottom">
@@ -237,7 +240,7 @@ const fileInput = ref(null)
 
 // 计算属性:是否可以提交
 const canSubmit = computed(() => {
-  return formData.value.simulationRequirement.trim() !== '' && files.value.length > 0
+  return formData.value.simulationRequirement.trim() !== ''
 })
 
 // 触发文件选择
@@ -518,8 +521,37 @@ const startSimulation = () => {
 }
 
 .hero-logo {
-  max-width: 500px; /* 调整logo大小 */
-  width: 100%;
+  width: min(100%, 520px);
+  min-height: 220px;
+  border: 2px solid var(--black);
+  background:
+    linear-gradient(135deg, rgba(255, 98, 68, 0.12), transparent 48%),
+    radial-gradient(circle at 82% 18%, rgba(255, 98, 68, 0.22), transparent 28%),
+    var(--white);
+  box-shadow: 12px 12px 0 var(--black);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 36px;
+  text-transform: uppercase;
+}
+
+.hero-logo-kicker {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.3em;
+  color: var(--orange);
+  margin-bottom: 14px;
+}
+
+.hero-logo-main {
+  font-family: var(--font-mono);
+  font-size: clamp(2.8rem, 6vw, 5.6rem);
+  font-weight: 900;
+  letter-spacing: -0.08em;
+  line-height: 0.9;
+  color: var(--black);
 }
 
 .scroll-down-btn {
@@ -890,7 +922,9 @@ const startSimulation = () => {
   }
   
   .hero-logo {
-    max-width: 200px;
+    min-height: 160px;
+    box-shadow: 8px 8px 0 var(--black);
+    padding: 24px;
     margin-bottom: 20px;
   }
 }

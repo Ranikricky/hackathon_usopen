@@ -25,6 +25,8 @@ import sqlite3
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
+INTERVIEW_STEP_TIMEOUT_SECONDS = 120.0
+
 # 全局变量：用于信号处理
 _shutdown_event = None
 _cleanup_done = False
@@ -230,7 +232,7 @@ class IPCHandler:
             
             # 执行Interview
             actions = {agent: interview_action}
-            await self.env.step(actions)
+            await asyncio.wait_for(self.env.step(actions), timeout=INTERVIEW_STEP_TIMEOUT_SECONDS)
             
             # 从数据库获取结果
             result = self._get_interview_result(agent_id)
@@ -276,7 +278,7 @@ class IPCHandler:
                 return False
             
             # 执行批量Interview
-            await self.env.step(actions)
+            await asyncio.wait_for(self.env.step(actions), timeout=INTERVIEW_STEP_TIMEOUT_SECONDS)
             
             # 获取所有结果
             results = {}

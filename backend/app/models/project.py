@@ -128,6 +128,11 @@ class ProjectManager:
     def _get_project_text_path(cls, project_id: str) -> str:
         """获取项目提取文本存储路径"""
         return os.path.join(cls._get_project_dir(project_id), 'extracted_text.txt')
+
+    @classmethod
+    def _get_project_local_graph_path(cls, project_id: str) -> str:
+        """获取项目本地图谱数据路径"""
+        return os.path.join(cls._get_project_dir(project_id), 'local_graph.json')
     
     @classmethod
     def create_project(cls, name: str = "Unnamed Project") -> Project:
@@ -303,3 +308,36 @@ class ProjectManager:
             if os.path.isfile(os.path.join(files_dir, f))
         ]
 
+    @classmethod
+    def get_project_by_graph_id(cls, graph_id: str) -> Optional[Project]:
+        """根据 graph_id 查找项目"""
+        if not graph_id:
+            return None
+        for project in cls.list_projects(limit=1000):
+            if project.graph_id == graph_id:
+                return project
+        return None
+
+    @classmethod
+    def save_local_graph(cls, project_id: str, graph_data: Dict[str, Any]) -> None:
+        """保存本地图谱数据"""
+        graph_path = cls._get_project_local_graph_path(project_id)
+        with open(graph_path, 'w', encoding='utf-8') as f:
+            json.dump(graph_data, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def get_local_graph(cls, project_id: str) -> Optional[Dict[str, Any]]:
+        """读取本地图谱数据"""
+        graph_path = cls._get_project_local_graph_path(project_id)
+        if not os.path.exists(graph_path):
+            return None
+        with open(graph_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    @classmethod
+    def get_local_graph_by_graph_id(cls, graph_id: str) -> Optional[Dict[str, Any]]:
+        """根据 graph_id 读取本地图谱数据"""
+        project = cls.get_project_by_graph_id(graph_id)
+        if not project:
+            return None
+        return cls.get_local_graph(project.project_id)

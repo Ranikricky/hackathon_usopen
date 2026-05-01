@@ -43,6 +43,14 @@ export const getReport = (reportId) => {
 }
 
 /**
+ * 获取报告列表
+ * @param {Object} params - { simulation_id?, limit? }
+ */
+export const listReports = (params = {}) => {
+  return service.get('/api/report/list', { params })
+}
+
+/**
  * 与 Report Agent 对话
  * @param {Object} data - { simulation_id, message, chat_history? }
  */

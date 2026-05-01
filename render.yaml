@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: horizon-xl
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: FLASK_DEBUG
+        value: "False"
+      - key: FLASK_HOST
+        value: "0.0.0.0"
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_MODEL_NAME
+        sync: false
+      - key: ZEP_API_KEY
+        sync: false

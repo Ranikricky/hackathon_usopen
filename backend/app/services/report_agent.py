@@ -29,8 +29,12 @@ from .zep_tools import (
     PanoramaResult,
     InterviewResult
 )
+from .simulation_manager import SimulationManager
+from .simulation_runner import SimulationRunner
+from .numeric_validation import NumericValidationService
+from ..models.simulation_state import SimulationStateManager
 
-logger = get_logger('mirofish.report_agent')
+logger = get_logger('horizonxl.report_agent')
 
 
 class ReportLogger:
@@ -353,8 +357,8 @@ class ReportConsoleLogger:
         
         # 添加到 report_agent 相关的 logger
         loggers_to_attach = [
-            'mirofish.report_agent',
-            'mirofish.zep_tools',
+            'horizonxl.report_agent',
+            'horizonxl.zep_tools',
         ]
         
         for logger_name in loggers_to_attach:
@@ -369,8 +373,8 @@ class ReportConsoleLogger:
         
         if self._file_handler:
             loggers_to_detach = [
-                'mirofish.report_agent',
-                'mirofish.zep_tools',
+                'horizonxl.report_agent',
+                'horizonxl.zep_tools',
             ]
             
             for logger_name in loggers_to_detach:
@@ -664,6 +668,10 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
    - 不要添加模拟中不存在的信息
    - 如果某方面信息不足，如实说明
 
+5. 【禁止虚构数据来源】
+   - 禁止声称“已进行网页抓取”“已访问实时外部数据库”等，除非工具返回结果中明确出现该来源证据
+   - 若无来源证据，只能写“基于当前模拟/图谱数据”
+
 ═══════════════════════════════════════════════════════════════
 【⚠️ 格式规范 - 极其重要！】
 ═══════════════════════════════════════════════════════════════
@@ -824,6 +832,12 @@ REACT_UNUSED_TOOLS_HINT = "\n💡 你还没有使用过: {unused_list}，建议�
 
 REACT_FORCE_FINAL_MSG = "已达到工具调用限制，请直接输出 Final Answer: 并生成章节内容。"
 
+REACT_LOW_EVIDENCE_MSG = (
+    "当前证据不足：累计可引用事实 {facts_count} 条，采访有效回复 {interviews_count} 位。"
+    "请继续调用工具获取更多可引用原文。"
+    "如果确实没有数据，请以 Final Answer 输出“证据不足说明”，并明确缺失项，不要推断。"
+)
+
 # ── Chat prompt ──
 
 CHAT_SYSTEM_PROMPT_TEMPLATE = """\
@@ -857,6 +871,206 @@ CHAT_SYSTEM_PROMPT_TEMPLATE = """\
 CHAT_OBSERVATION_SUFFIX = "\n\n请简洁回答问题。"
 
 
+# English-only runtime prompt overrides. These replace the original Chinese
+# prompts above without changing the surrounding report-agent control flow.
+TOOL_DESC_INSIGHT_FORGE = """\
+[InsightForge - Deep Retrieval]
+Use this tool for the strongest multi-angle retrieval. It decomposes a question
+into sub-questions, searches facts/entities/relationships, and returns source
+material that can be cited in the report.
+
+Best for: deep section analysis, multi-factor explanations, and evidence gathering."""
+
+TOOL_DESC_PANORAMA_SEARCH = """\
+[Panorama Search - Broad View]
+Use this tool to inspect the full graph context, active facts, historical facts,
+involved entities, and broad event evolution.
+
+Best for: timeline, system-wide context, and broad relationship coverage."""
+
+TOOL_DESC_QUICK_SEARCH = """\
+[Quick Search]
+Use this tool for focused fact lookup or quick validation of a specific point."""
+
+TOOL_DESC_INTERVIEW_AGENTS = """\
+[Agent Interview - Real Simulation Interview]
+Calls the OASIS simulation interview API for running agents. Use it when the
+report needs first-person perspectives from simulated actors. Requires the
+simulation environment to be running."""
+
+TOOL_DESC_TIME_POCKET_TIMELINE = """\
+[Time Pocket Timeline - Simulation Action Logs]
+Use this tool to inspect the actual sequential simulation pockets. It groups
+saved agent actions by the configured future time pocket so the report can show
+what happened in pocket 1, how state carried into pocket 2, and so on.
+
+Best for: proving that a forecast path came from pocket-by-pocket simulation
+rather than interpolation or one-shot report writing."""
+
+PLAN_SYSTEM_PROMPT = """\
+You are an expert forecast-report writer with a god's-eye view of the simulated world.
+You must write in English only.
+
+Core idea: the simulation is a future rehearsal. The user's simulation requirement
+is the condition injected into the world, and agent behavior is the simulated
+forecast of how people/institutions may react.
+
+Your task is to plan a concise forecast report answering:
+1. What happened in the simulated future under the stated conditions?
+2. How did different agents/groups react?
+3. What trends, risks, mechanisms, and forecast numbers matter most?
+
+Rules:
+- This is a simulation-based forecast report, not a generic current-events essay.
+- Focus on forecast results, agent behavior, emergent mechanisms, risks, and numbers.
+- Use 2 to 5 sections.
+- Section titles and all text must be English.
+- If the user asks for numerical forecasts, include sections that explicitly surface numbers.
+- Every future simulation must be treated as a sequence of time pockets. If the
+  scenario has a future horizon, include methodology that explains the chosen
+  pocket size, how each pocket updates state, and how later pockets depend on
+  earlier pockets. Do not plan a report that collapses the horizon into one
+  static answer or fills missing periods by interpolation.
+
+Return JSON only:
+{
+  "title": "English report title",
+  "summary": "One-sentence English summary of the core forecast finding",
+  "sections": [
+    {"title": "English section title", "description": "English section description"}
+  ]
+}"""
+
+PLAN_USER_PROMPT_TEMPLATE = """\
+Forecast scenario injected into the simulation:
+{simulation_requirement}
+
+Simulation scale:
+- Entity count: {total_nodes}
+- Relationship count: {total_edges}
+- Entity type distribution: {entity_types}
+- Active agent count: {total_entities}
+
+Sample simulated future facts:
+{related_facts_json}
+
+Plan the best English forecast report structure. Use 2 to 5 focused sections.
+If the requirement asks for forecast numbers, dedicate at least one section to
+explicit numerical projections and scenario comparisons. If the scenario covers
+future time, dedicate a section to the sequential time-pocket path, state updates,
+and table/output requirements."""
+
+SECTION_SYSTEM_PROMPT_TEMPLATE = """\
+You are writing one section of an English future-forecast report.
+
+Report title: {report_title}
+Report summary: {report_summary}
+Forecast scenario: {simulation_requirement}
+Current section: {section_title}
+
+Core principle:
+The simulated world is a rehearsal of a possible future. Agent behavior,
+relationships, interviews, and graph facts are the evidence. Do not use outside
+knowledge unless it is present in tool results or the simulation context.
+
+Hard rules:
+1. Write in English only, including translated quotes and paraphrases.
+2. Every claim must be grounded in tool results from the simulated graph/interviews.
+3. Use 3 to 5 tool calls per section unless the tool limit is reached.
+4. If evidence is thin, say so instead of inventing facts.
+5. Do not claim web scraping, live browsing, or external database access unless a tool result explicitly proves it.
+6. If the user requested numbers, include concrete numerical forecasts, ranges, tables, or scenario values when supported by retrieved evidence; if missing, state what is missing.
+7. Future-time outputs must be framed as sequential time-pocket simulation, not interpolation. A valid forecast path must identify the pocket size, show that pocket T updates the world state, and show that pocket T+1 uses the updated state. If the available tools did not produce pocket-by-pocket evidence, state that the pocket simulation was not run and mark any timeline/table as illustrative or insufficient-evidence only.
+8. For any section that discusses future evolution over time, call time_pocket_timeline before writing final content.
+
+Formatting:
+- Do not use Markdown headings inside the section. The system adds the section title.
+- Use paragraphs, bullet lists, bold labels, and block quotes.
+- Quotes must be standalone block quotes with blank lines before and after.
+
+Available tools:
+{tools_description}
+
+Workflow:
+You may do exactly one of these per response:
+A. Call one tool using:
+<tool_call>
+{{"name": "tool_name", "parameters": {{"parameter": "value"}}}}
+</tool_call>
+B. Output final section text beginning with:
+Final Answer:
+
+Never include a tool call and Final Answer in the same response."""
+
+SECTION_USER_PROMPT_TEMPLATE = """\
+Previously completed sections:
+{previous_content}
+
+Current task: write the section "{section_title}".
+
+Before writing, call tools to collect simulation evidence. Avoid repeating prior
+sections. Write English-only final content. Do not start with the section title.
+Use bold labels instead of headings."""
+
+REACT_OBSERVATION_TEMPLATE = """\
+Observation:
+
+=== Tool {tool_name} returned ===
+{result}
+
+Tool calls used: {tool_calls_count}/{max_tool_calls}. Used tools: {used_tools_str}.{unused_hint}
+- If evidence is sufficient: output "Final Answer:" followed by section content.
+- If more evidence is needed: call one additional tool.
+"""
+
+REACT_INSUFFICIENT_TOOLS_MSG = (
+    "You have only called {tool_calls_count} tool(s); at least {min_tool_calls} are expected. "
+    "Call another tool for more simulation evidence before Final Answer. {unused_hint}"
+)
+
+REACT_INSUFFICIENT_TOOLS_MSG_ALT = (
+    "Only {tool_calls_count} tool call(s) so far; at least {min_tool_calls} are expected. "
+    "Call a tool for simulation data. {unused_hint}"
+)
+
+REACT_TOOL_LIMIT_MSG = (
+    "The tool-call limit has been reached ({tool_calls_count}/{max_tool_calls}). "
+    'Now output "Final Answer:" using only the evidence already gathered.'
+)
+
+REACT_UNUSED_TOOLS_HINT = "\nYou have not used: {unused_list}. Consider a different tool for another angle."
+REACT_FORCE_FINAL_MSG = 'Tool-call limit reached. Output "Final Answer:" and write the section in English.'
+REACT_LOW_EVIDENCE_MSG = (
+    "Evidence is thin: {facts_count} citable facts and {interviews_count} valid interview responses. "
+    "Call another tool for more evidence. If evidence remains missing, output a Final Answer that clearly says what is missing."
+)
+
+CHAT_SYSTEM_PROMPT_TEMPLATE = """\
+You are a concise English simulation-forecast assistant.
+
+Forecast condition:
+{simulation_requirement}
+
+Generated report:
+{report_content}
+
+Rules:
+1. Answer in English only.
+2. Prefer the report content.
+3. Call tools only when the report is insufficient.
+4. Be direct, numerical where possible, and clear about missing evidence.
+
+Available tools:
+{tools_description}
+
+Tool format:
+<tool_call>
+{{"name": "tool_name", "parameters": {{"parameter": "value"}}}}
+</tool_call>"""
+
+CHAT_OBSERVATION_SUFFIX = "\n\nAnswer concisely in English."
+
+
 # ═══════════════════════════════════════════════════════════════
 # ReportAgent 主类
 # ═══════════════════════════════════════════════════════════════
@@ -873,7 +1087,7 @@ class ReportAgent:
     """
     
     # 最大工具调用次数（每个章节）
-    MAX_TOOL_CALLS_PER_SECTION = 5
+    MAX_TOOL_CALLS_PER_SECTION = 6
     
     # 最大反思轮数
     MAX_REFLECTION_ROUNDS = 3
@@ -913,44 +1127,200 @@ class ReportAgent:
         self.report_logger: Optional[ReportLogger] = None
         # 控制台日志记录器（在 generate_report 中初始化）
         self.console_logger: Optional[ReportConsoleLogger] = None
+        # 最近一次工具调用的结构化元信息（用于证据充足性判定）
+        self._last_tool_meta: Dict[str, Any] = {
+            "tool": None,
+            "facts": 0,
+            "entities": 0,
+            "relationships": 0,
+            "interviews": 0,
+            "error": None,
+        }
         
         logger.info(t('report.agentInitDone', graphId=graph_id, simulationId=simulation_id))
+
+    def _reset_last_tool_meta(self, tool_name: Optional[str] = None):
+        """重置最近一次工具调用元信息"""
+        self._last_tool_meta = {
+            "tool": tool_name,
+            "facts": 0,
+            "entities": 0,
+            "relationships": 0,
+            "interviews": 0,
+            "error": None,
+        }
+
+    @staticmethod
+    def _has_sufficient_evidence(
+        facts_count: int,
+        interviews_count: int
+    ) -> bool:
+        """
+        判断章节证据是否充足。
+        至少满足其一：
+        - 可引用事实 >= 5
+        - 有效采访 >= 2
+        """
+        return facts_count >= 5 or interviews_count >= 2
+
+    def _build_insufficient_evidence_section(
+        self,
+        section_title: str,
+        tool_calls_count: int,
+        facts_count: int,
+        interviews_count: int,
+        used_tools: set,
+        reason: str
+    ) -> str:
+        """Build a conservative section when evidence is insufficient."""
+        tools_text = ", ".join(sorted(used_tools)) if used_tools else "none"
+        return (
+            f"**Insufficient Evidence Notice**\n\n"
+            f"The section \"{section_title}\" did not receive enough citable simulation evidence, so automatic inference was stopped to avoid distorted output.\n\n"
+            f"- Stop reason: {reason}\n"
+            f"- Tool calls used: {tool_calls_count}\n"
+            f"- Citable facts collected: {facts_count}\n"
+            f"- Valid interview responses collected: {interviews_count}\n"
+            f"- Tools used: {tools_text}\n\n"
+            f"**Recommended Data Additions**\n"
+            f"- Import more source material, tables, or datasets\n"
+            f"- Confirm that simulation interviews are stable, then retry\n"
+            f"- Generate this section only after enough evidence is available"
+        )
     
     def _define_tools(self) -> Dict[str, Dict[str, Any]]:
         """定义可用工具"""
         return {
+            "time_pocket_timeline": {
+                "name": "time_pocket_timeline",
+                "description": TOOL_DESC_TIME_POCKET_TIMELINE,
+                "parameters": {
+                    "limit_pockets": "Number of sequential pockets to return, optional, default 12",
+                    "actions_per_pocket": "Number of representative actions per pocket, optional, default 5"
+                }
+            },
             "insight_forge": {
                 "name": "insight_forge",
                 "description": TOOL_DESC_INSIGHT_FORGE,
                 "parameters": {
-                    "query": "你想深入分析的问题或话题",
-                    "report_context": "当前报告章节的上下文（可选，有助于生成更精准的子问题）"
+                    "query": "The question or topic to analyze",
+                    "report_context": "Current report-section context, optional"
                 }
             },
             "panorama_search": {
                 "name": "panorama_search",
                 "description": TOOL_DESC_PANORAMA_SEARCH,
                 "parameters": {
-                    "query": "搜索查询，用于相关性排序",
-                    "include_expired": "是否包含过期/历史内容（默认True）"
+                    "query": "Search query for relevance ranking",
+                    "include_expired": "Whether to include expired/historical content, default true"
                 }
             },
             "quick_search": {
                 "name": "quick_search",
                 "description": TOOL_DESC_QUICK_SEARCH,
                 "parameters": {
-                    "query": "搜索查询字符串",
-                    "limit": "返回结果数量（可选，默认10）"
+                    "query": "Search query string",
+                    "limit": "Number of results to return, optional, default 10"
                 }
             },
             "interview_agents": {
                 "name": "interview_agents",
                 "description": TOOL_DESC_INTERVIEW_AGENTS,
                 "parameters": {
-                    "interview_topic": "采访主题或需求描述（如：'了解学生对宿舍甲醛事件的看法'）",
-                    "max_agents": "最多采访的Agent数量（可选，默认5，最大10）"
+                    "interview_topic": "Interview topic or requirement",
+                    "max_agents": "Maximum number of agents to interview, optional, default 5, max 10"
                 }
             }
+        }
+
+    def _get_time_pocket_timeline(
+        self,
+        limit_pockets: int = 12,
+        actions_per_pocket: int = 5
+    ) -> Dict[str, Any]:
+        """Group saved simulation actions by the configured future time pocket."""
+        limit_pockets = max(1, min(int(limit_pockets or 12), 120))
+        actions_per_pocket = max(1, min(int(actions_per_pocket or 5), 20))
+
+        manager = SimulationManager()
+        config = manager.get_simulation_config(self.simulation_id) or {}
+        time_config = config.get("time_config", {}) or {}
+        rounds_per_pocket = max(1, int(time_config.get("rounds_per_pocket", 1) or 1))
+        total_pockets = int(time_config.get("total_pockets", 0) or 0)
+        unit_label = time_config.get("pocket_unit_label", "pocket")
+        duration_minutes = int(
+            time_config.get("pocket_duration_minutes")
+            or (int(time_config.get("minutes_per_round", 60) or 60) * rounds_per_pocket)
+        )
+        carryover = time_config.get(
+            "state_carryover_policy",
+            "Each pocket inherits the previous pocket's action history and updated simulated state."
+        )
+
+        actions = list(reversed(SimulationRunner.get_all_actions(self.simulation_id)))
+        pockets: Dict[int, List[Any]] = {}
+        for action in actions:
+            round_num = int(getattr(action, "round_num", 0) or 0)
+            if round_num <= 0:
+                continue
+            pocket_index = ((round_num - 1) // rounds_per_pocket) + 1
+            pockets.setdefault(pocket_index, []).append(action)
+
+        lines = [
+            "## Time Pocket Timeline",
+            f"Pocket unit: {unit_label}",
+            f"Pocket duration minutes: {duration_minutes}",
+            f"Configured total pockets: {total_pockets or 'unknown'}",
+            f"Observed pockets with actions: {len(pockets)}",
+            f"State carryover policy: {carryover}",
+            "",
+            "Interpretation rule: pocket N is the input state for pocket N+1. Do not interpolate missing pockets; mark them as missing simulation evidence.",
+        ]
+
+        for pocket_index in sorted(pockets)[:limit_pockets]:
+            pocket_actions = pockets[pocket_index]
+            active_agents = sorted({
+                getattr(action, "agent_name", "") or f"Agent_{getattr(action, 'agent_id', '')}"
+                for action in pocket_actions
+            })
+            lines.append("")
+            lines.append(f"### Pocket {pocket_index} ({unit_label})")
+            lines.append(f"- Actions: {len(pocket_actions)}")
+            lines.append(f"- Active agents: {len(active_agents)}")
+            if active_agents:
+                lines.append(f"- Agent sample: {', '.join(active_agents[:8])}")
+            lines.append("- Representative actions:")
+            for action in pocket_actions[:actions_per_pocket]:
+                args = getattr(action, "action_args", {}) or {}
+                content = (
+                    args.get("content")
+                    or args.get("post_content")
+                    or args.get("comment_content")
+                    or args.get("query")
+                    or ""
+                )
+                if isinstance(content, str) and len(content) > 240:
+                    content = content[:237] + "..."
+                lines.append(
+                    f"  - {getattr(action, 'platform', '')} / "
+                    f"{getattr(action, 'agent_name', '')}: "
+                    f"{getattr(action, 'action_type', '')}"
+                    f"{f' - {content}' if content else ''}"
+                )
+
+        if not pockets:
+            lines.append("")
+            lines.append("No pocket-level actions were found. The recursive time-pocket simulation has not produced evidence yet.")
+
+        return {
+            "text": "\n".join(lines),
+            "actions_count": len(actions),
+            "active_agents": len({
+                getattr(action, "agent_id", None)
+                for action in actions
+                if getattr(action, "agent_id", None) is not None
+            }),
+            "pockets_with_actions": len(pockets),
         }
     
     def _execute_tool(self, tool_name: str, parameters: Dict[str, Any], report_context: str = "") -> str:
@@ -966,8 +1336,28 @@ class ReportAgent:
             工具执行结果（文本格式）
         """
         logger.info(t('report.executingTool', toolName=tool_name, params=parameters))
+        self._reset_last_tool_meta(tool_name)
         
         try:
+            if tool_name == "time_pocket_timeline":
+                limit_pockets = parameters.get("limit_pockets", 12)
+                actions_per_pocket = parameters.get("actions_per_pocket", 5)
+                if isinstance(limit_pockets, str):
+                    limit_pockets = int(limit_pockets)
+                if isinstance(actions_per_pocket, str):
+                    actions_per_pocket = int(actions_per_pocket)
+                result = self._get_time_pocket_timeline(
+                    limit_pockets=limit_pockets,
+                    actions_per_pocket=actions_per_pocket,
+                )
+                self._last_tool_meta.update({
+                    "facts": int(result.get("actions_count", 0) or 0),
+                    "entities": int(result.get("active_agents", 0) or 0),
+                    "relationships": int(result.get("pockets_with_actions", 0) or 0),
+                })
+                return result["text"]
+
+            
             if tool_name == "insight_forge":
                 query = parameters.get("query", "")
                 ctx = parameters.get("report_context", "") or report_context
@@ -977,6 +1367,11 @@ class ReportAgent:
                     simulation_requirement=self.simulation_requirement,
                     report_context=ctx
                 )
+                self._last_tool_meta.update({
+                    "facts": int(getattr(result, "total_facts", 0) or 0),
+                    "entities": int(getattr(result, "total_entities", 0) or 0),
+                    "relationships": int(getattr(result, "total_relationships", 0) or 0),
+                })
                 return result.to_text()
             
             elif tool_name == "panorama_search":
@@ -990,6 +1385,11 @@ class ReportAgent:
                     query=query,
                     include_expired=include_expired
                 )
+                self._last_tool_meta.update({
+                    "facts": int(getattr(result, "active_count", 0) or 0),
+                    "entities": int(getattr(result, "total_nodes", 0) or 0),
+                    "relationships": int(getattr(result, "total_edges", 0) or 0),
+                })
                 return result.to_text()
             
             elif tool_name == "quick_search":
@@ -1003,6 +1403,9 @@ class ReportAgent:
                     query=query,
                     limit=limit
                 )
+                self._last_tool_meta.update({
+                    "facts": int(getattr(result, "total_count", 0) or 0),
+                })
                 return result.to_text()
             
             elif tool_name == "interview_agents":
@@ -1018,6 +1421,9 @@ class ReportAgent:
                     simulation_requirement=self.simulation_requirement,
                     max_agents=max_agents
                 )
+                self._last_tool_meta.update({
+                    "interviews": int(getattr(result, "interviewed_count", 0) or 0),
+                })
                 return result.to_text()
             
             # ========== 向后兼容的旧工具（内部重定向到新工具） ==========
@@ -1055,14 +1461,15 @@ class ReportAgent:
                 return json.dumps(result, ensure_ascii=False, indent=2)
             
             else:
-                return f"未知工具: {tool_name}。请使用以下工具之一: insight_forge, panorama_search, quick_search"
+                return f"Unknown tool: {tool_name}. Use one of: time_pocket_timeline, insight_forge, panorama_search, quick_search, interview_agents"
                 
         except Exception as e:
             logger.error(t('report.toolExecFailed', toolName=tool_name, error=str(e)))
-            return f"工具执行失败: {str(e)}"
+            self._last_tool_meta["error"] = str(e)
+            return f"Tool execution failed: {str(e)}"
     
     # 合法的工具名称集合，用于裸 JSON 兜底解析时校验
-    VALID_TOOL_NAMES = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+    VALID_TOOL_NAMES = {"time_pocket_timeline", "insight_forge", "panorama_search", "quick_search", "interview_agents"}
 
     def _parse_tool_calls(self, response: str) -> List[Dict[str, Any]]:
         """
@@ -1126,12 +1533,12 @@ class ReportAgent:
     
     def _get_tools_description(self) -> str:
         """生成工具描述文本"""
-        desc_parts = ["可用工具："]
+        desc_parts = ["Available tools:"]
         for name, tool in self.tools.items():
             params_desc = ", ".join([f"{k}: {v}" for k, v in tool["parameters"].items()])
             desc_parts.append(f"- {name}: {tool['description']}")
             if params_desc:
-                desc_parts.append(f"  参数: {params_desc}")
+                desc_parts.append(f"  Parameters: {params_desc}")
         return "\n".join(desc_parts)
     
     def plan_outline(
@@ -1194,7 +1601,7 @@ class ReportAgent:
                 ))
             
             outline = ReportOutline(
-                title=response.get("title", "模拟分析报告"),
+                title=response.get("title", "Simulation Forecast Report"),
                 summary=response.get("summary", ""),
                 sections=sections
             )
@@ -1207,14 +1614,14 @@ class ReportAgent:
             
         except Exception as e:
             logger.error(t('report.outlinePlanFailed', error=str(e)))
-            # 返回默认大纲（3个章节，作为fallback）
+            # Return a default English outline as fallback.
             return ReportOutline(
-                title="未来预测报告",
-                summary="基于模拟预测的未来趋势与风险分析",
+                title="Future Forecast Report",
+                summary="Future trends and risks inferred from the simulation forecast.",
                 sections=[
-                    ReportSection(title="预测场景与核心发现"),
-                    ReportSection(title="人群行为预测分析"),
-                    ReportSection(title="趋势展望与风险提示")
+                    ReportSection(title="Forecast Scenario and Core Findings"),
+                    ReportSection(title="Agent Behavior Forecast"),
+                    ReportSection(title="Trend Outlook and Risk Signals")
                 ]
             )
     
@@ -1270,7 +1677,7 @@ class ReportAgent:
                 previous_parts.append(truncated)
             previous_content = "\n\n---\n\n".join(previous_parts)
         else:
-            previous_content = "（这是第一个章节）"
+            previous_content = "(This is the first section.)"
         
         user_prompt = SECTION_USER_PROMPT_TEMPLATE.format(
             previous_content=previous_content,
@@ -1288,10 +1695,12 @@ class ReportAgent:
         min_tool_calls = 3  # 最少工具调用次数
         conflict_retries = 0  # 工具调用与Final Answer同时出现的连续冲突次数
         used_tools = set()  # 记录已调用过的工具名
-        all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        all_tools = {"time_pocket_timeline", "insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        evidence_facts = 0
+        evidence_interviews = 0
 
         # 报告上下文，用于InsightForge的子问题生成
-        report_context = f"章节标题: {section.title}\n模拟需求: {self.simulation_requirement}"
+        report_context = f"Section title: {section.title}\nSimulation requirement: {self.simulation_requirement}"
         
         for iteration in range(max_iterations):
             if progress_callback:
@@ -1313,8 +1722,8 @@ class ReportAgent:
                 logger.warning(t('report.sectionIterNone', title=section.title, iteration=iteration + 1))
                 # 如果还有迭代次数，添加消息并重试
                 if iteration < max_iterations - 1:
-                    messages.append({"role": "assistant", "content": "（响应为空）"})
-                    messages.append({"role": "user", "content": "请继续生成内容。"})
+                    messages.append({"role": "assistant", "content": "(Empty response.)"})
+                    messages.append({"role": "user", "content": "Continue in English."})
                     continue
                 # 最后一次迭代也返回 None，跳出循环进入强制收尾
                 break
@@ -1339,11 +1748,11 @@ class ReportAgent:
                     messages.append({
                         "role": "user",
                         "content": (
-                            "【格式错误】你在一次回复中同时包含了工具调用和 Final Answer，这是不允许的。\n"
-                            "每次回复只能做以下两件事之一：\n"
-                            "- 调用一个工具（输出一个 <tool_call> 块，不要写 Final Answer）\n"
-                            "- 输出最终内容（以 'Final Answer:' 开头，不要包含 <tool_call>）\n"
-                            "请重新回复，只做其中一件事。"
+                            "Format error: your response included both a tool call and Final Answer.\n"
+                            "Each response must do exactly one of these:\n"
+                            "- Call one tool with a <tool_call> block and no Final Answer\n"
+                            "- Output final content beginning with 'Final Answer:' and no <tool_call>\n"
+                            "Reply again in English and do only one action."
                         ),
                     })
                     continue
@@ -1377,13 +1786,25 @@ class ReportAgent:
                 if tool_calls_count < min_tool_calls:
                     messages.append({"role": "assistant", "content": response})
                     unused_tools = all_tools - used_tools
-                    unused_hint = f"（这些工具还未使用，推荐用一下他们: {', '.join(unused_tools)}）" if unused_tools else ""
+                    unused_hint = f"(Unused tools: {', '.join(unused_tools)}.)" if unused_tools else ""
                     messages.append({
                         "role": "user",
                         "content": REACT_INSUFFICIENT_TOOLS_MSG.format(
                             tool_calls_count=tool_calls_count,
                             min_tool_calls=min_tool_calls,
                             unused_hint=unused_hint,
+                        ),
+                    })
+                    continue
+
+                # 证据不足：拒绝直接收尾，要求继续检索或明确输出证据不足说明
+                if not self._has_sufficient_evidence(evidence_facts, evidence_interviews):
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({
+                        "role": "user",
+                        "content": REACT_LOW_EVIDENCE_MSG.format(
+                            facts_count=evidence_facts,
+                            interviews_count=evidence_interviews,
                         ),
                     })
                     continue
@@ -1405,6 +1826,24 @@ class ReportAgent:
             if has_tool_calls:
                 # 工具额度已耗尽 → 明确告知，要求输出 Final Answer
                 if tool_calls_count >= self.MAX_TOOL_CALLS_PER_SECTION:
+                    if not self._has_sufficient_evidence(evidence_facts, evidence_interviews):
+                        final_answer = self._build_insufficient_evidence_section(
+                            section_title=section.title,
+                            tool_calls_count=tool_calls_count,
+                            facts_count=evidence_facts,
+                            interviews_count=evidence_interviews,
+                            used_tools=used_tools,
+                            reason="Tool limit reached but evidence is still insufficient",
+                        )
+                        if self.report_logger:
+                            self.report_logger.log_section_content(
+                                section_title=section.title,
+                                section_index=section_index,
+                                content=final_answer,
+                                tool_calls_count=tool_calls_count
+                            )
+                        return final_answer
+
                     messages.append({"role": "assistant", "content": response})
                     messages.append({
                         "role": "user",
@@ -1434,6 +1873,9 @@ class ReportAgent:
                     call.get("parameters", {}),
                     report_context=report_context
                 )
+                tool_meta = dict(self._last_tool_meta)
+                evidence_facts += int(tool_meta.get("facts", 0) or 0)
+                evidence_interviews += int(tool_meta.get("interviews", 0) or 0)
 
                 if self.report_logger:
                     self.report_logger.log_tool_result(
@@ -1451,7 +1893,7 @@ class ReportAgent:
                 unused_tools = all_tools - used_tools
                 unused_hint = ""
                 if unused_tools and tool_calls_count < self.MAX_TOOL_CALLS_PER_SECTION:
-                    unused_hint = REACT_UNUSED_TOOLS_HINT.format(unused_list="、".join(unused_tools))
+                    unused_hint = REACT_UNUSED_TOOLS_HINT.format(unused_list=", ".join(sorted(unused_tools)))
 
                 messages.append({"role": "assistant", "content": response})
                 messages.append({
@@ -1473,7 +1915,7 @@ class ReportAgent:
             if tool_calls_count < min_tool_calls:
                 # 工具调用次数不足，推荐未用过的工具
                 unused_tools = all_tools - used_tools
-                unused_hint = f"（这些工具还未使用，推荐用一下他们: {', '.join(unused_tools)}）" if unused_tools else ""
+                unused_hint = f"(Unused tools: {', '.join(unused_tools)}.)" if unused_tools else ""
 
                 messages.append({
                     "role": "user",
@@ -1486,7 +1928,18 @@ class ReportAgent:
                 continue
 
             # 工具调用已足够，LLM 输出了内容但没带 "Final Answer:" 前缀
-            # 直接将这段内容作为最终答案，不再空转
+            # 只有证据充足时才直接收尾
+            if not self._has_sufficient_evidence(evidence_facts, evidence_interviews):
+                messages.append({
+                    "role": "user",
+                    "content": REACT_LOW_EVIDENCE_MSG.format(
+                        facts_count=evidence_facts,
+                        interviews_count=evidence_interviews,
+                    ),
+                })
+                continue
+
+            # 证据充足，直接将这段内容作为最终答案，不再空转
             logger.info(t('report.sectionNoPrefix', title=section.title, count=tool_calls_count))
             final_answer = response.strip()
 
@@ -1499,7 +1952,30 @@ class ReportAgent:
                 )
             return final_answer
         
-        # 达到最大迭代次数，强制生成内容
+        # 达到最大迭代次数
+        if not self._has_sufficient_evidence(evidence_facts, evidence_interviews):
+            logger.warning(
+                "Section evidence insufficient: title=%s, facts=%s, interviews=%s, tool_calls=%s",
+                section.title, evidence_facts, evidence_interviews, tool_calls_count
+            )
+            final_answer = self._build_insufficient_evidence_section(
+                section_title=section.title,
+                tool_calls_count=tool_calls_count,
+                facts_count=evidence_facts,
+                interviews_count=evidence_interviews,
+                used_tools=used_tools,
+                reason="Maximum iterations reached and evidence is insufficient",
+            )
+            if self.report_logger:
+                self.report_logger.log_section_content(
+                    section_title=section.title,
+                    section_index=section_index,
+                    content=final_answer,
+                    tool_calls_count=tool_calls_count
+                )
+            return final_answer
+
+        # 证据充足时才允许强制收尾
         logger.warning(t('report.sectionMaxIter', title=section.title))
         messages.append({"role": "user", "content": REACT_FORCE_FINAL_MSG})
         
@@ -1532,7 +2008,8 @@ class ReportAgent:
     def generate_report(
         self, 
         progress_callback: Optional[Callable[[str, int, str], None]] = None,
-        report_id: Optional[str] = None
+        report_id: Optional[str] = None,
+        bypass_validation: bool = False
     ) -> Report:
         """
         生成完整报告（分章节实时输出）
@@ -1577,6 +2054,58 @@ class ReportAgent:
         try:
             # 初始化：创建报告文件夹并保存初始状态
             ReportManager._ensure_report_folder(report_id)
+
+            if not bypass_validation:
+                structured_state = SimulationStateManager.load(self.simulation_id)
+                validator = NumericValidationService()
+                if not structured_state:
+                    validation = {
+                        "passed": False,
+                        "errors": ["Structured simulation state is missing."],
+                        "warnings": [],
+                        "missing_agents": [],
+                        "missing_variables": [],
+                        "missing_dates": [],
+                        "missing_scenarios": [],
+                        "numeric_quality_score": 0.0,
+                    }
+                else:
+                    validation = validator.validate(structured_state.to_dict())
+                    SimulationStateManager.update_validation(self.simulation_id, validation)
+
+                if not validation["passed"]:
+                    diagnostic = validator.diagnostic_message(validation)
+                    report.status = ReportStatus.FAILED
+                    report.error = diagnostic["title"]
+                    report.completed_at = datetime.now().isoformat()
+                    report.outline = ReportOutline(
+                        title="Simulation Evidence Insufficient",
+                        summary=diagnostic["summary"],
+                        sections=[
+                            ReportSection(
+                                title="Validation Diagnostic",
+                                content=(
+                                    "Horizon XL refused to generate a polished report because the "
+                                    "structured simulation state failed validation.\n\n"
+                                    "```json\n"
+                                    f"{json.dumps(diagnostic, ensure_ascii=False, indent=2)}\n"
+                                    "```"
+                                )
+                            )
+                        ]
+                    )
+                    report.markdown_content = report.outline.to_markdown()
+                    ReportManager.save_outline(report_id, report.outline)
+                    ReportManager.save_full_report(report_id, report.markdown_content)
+                    ReportManager.update_progress(
+                        report_id,
+                        "failed",
+                        100,
+                        "Simulation evidence insufficient",
+                        completed_sections=[]
+                    )
+                    ReportManager.save_report(report)
+                    return report
             
             # 初始化日志记录器（结构化日志 agent_log.jsonl）
             self.report_logger = ReportLogger(report_id)
@@ -1796,13 +2325,13 @@ class ReportAgent:
                 # 限制报告长度，避免上下文过长
                 report_content = report.markdown_content[:15000]
                 if len(report.markdown_content) > 15000:
-                    report_content += "\n\n... [报告内容已截断] ..."
+                    report_content += "\n\n... [Report content truncated] ..."
         except Exception as e:
             logger.warning(t('report.fetchReportFailed', error=e))
         
         system_prompt = CHAT_SYSTEM_PROMPT_TEMPLATE.format(
             simulation_requirement=self.simulation_requirement,
-            report_content=report_content if report_content else "（暂无报告）",
+            report_content=report_content if report_content else "(No report yet.)",
             tools_description=self._get_tools_description(),
         )
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
@@ -1858,7 +2387,7 @@ class ReportAgent:
             
             # 将结果添加到消息
             messages.append({"role": "assistant", "content": response})
-            observation = "\n".join([f"[{r['tool']}结果]\n{r['result']}" for r in tool_results])
+            observation = "\n".join([f"[{r['tool']} result]\n{r['result']}" for r in tool_results])
             messages.append({
                 "role": "user",
                 "content": observation + CHAT_OBSERVATION_SUFFIX
@@ -2499,23 +3028,20 @@ class ReportManager:
     @classmethod
     def get_report_by_simulation(cls, simulation_id: str) -> Optional[Report]:
         """根据模拟ID获取报告"""
-        cls._ensure_reports_dir()
-        
-        for item in os.listdir(cls.REPORTS_DIR):
-            item_path = os.path.join(cls.REPORTS_DIR, item)
-            # 新格式：文件夹
-            if os.path.isdir(item_path):
-                report = cls.get_report(item)
-                if report and report.simulation_id == simulation_id:
-                    return report
-            # 兼容旧格式：JSON文件
-            elif item.endswith('.json'):
-                report_id = item[:-5]
-                report = cls.get_report(report_id)
-                if report and report.simulation_id == simulation_id:
-                    return report
-        
-        return None
+        reports = cls.list_reports(simulation_id=simulation_id, limit=500)
+        if not reports:
+            return None
+
+        # 优先级：已完成 > 生成中 > 规划中 > 待处理 > 其他 > 失败
+        priority = {
+            ReportStatus.COMPLETED: 0,
+            ReportStatus.GENERATING: 1,
+            ReportStatus.PLANNING: 2,
+            ReportStatus.PENDING: 3,
+            ReportStatus.FAILED: 9,
+        }
+        reports.sort(key=lambda r: priority.get(r.status, 5))
+        return reports[0]
     
     @classmethod
     def list_reports(cls, simulation_id: Optional[str] = None, limit: int = 50) -> List[Report]:

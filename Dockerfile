@@ -10,6 +10,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.26 /uv /uvx /bin/
 
 WORKDIR /app
 
+# Reduce transient dependency-download failures during image builds.
+ENV UV_HTTP_TIMEOUT=120
+ENV UV_HTTP_RETRIES=5
+
 # 先复制依赖描述文件以利用缓存
 COPY package.json package-lock.json ./
 COPY frontend/package.json frontend/package-lock.json ./frontend/
@@ -23,7 +27,8 @@ RUN npm ci \
 # 复制项目源码
 COPY . .
 
-EXPOSE 3000 5001
+RUN npm run build
 
-# 同时启动前后端（开发模式）
-CMD ["npm", "run", "dev"]
+EXPOSE 5001
+
+CMD ["npm", "run", "backend"]

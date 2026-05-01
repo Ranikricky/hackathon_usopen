@@ -13,11 +13,15 @@ from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
+from ..services.domain_simulation_planner import DomainSimulationPlanner
+from ..services.agent_generation_engine import AgentGenerationEngine
+from ..services.numeric_validation import NumericValidationService
 from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
 from ..models.project import ProjectManager
+from ..models.simulation_state import SimulationStateManager
 
-logger = get_logger('mirofish.api.simulation')
+logger = get_logger('horizonxl.api.simulation')
 
 
 # Interview prompt 优化前缀
@@ -57,7 +61,7 @@ def get_graph_entities(graph_id: str):
         enrich: 是否获取相关边信息（默认true）
     """
     try:
-        if not Config.ZEP_API_KEY:
+        if not Config.ZEP_API_KEY and not graph_id.startswith("local_"):
             return jsonify({
                 "success": False,
                 "error": t('api.zepApiKeyMissing')
@@ -94,7 +98,7 @@ def get_graph_entities(graph_id: str):
 def get_entity_detail(graph_id: str, entity_uuid: str):
     """获取单个实体的详细信息"""
     try:
-        if not Config.ZEP_API_KEY:
+        if not Config.ZEP_API_KEY and not graph_id.startswith("local_"):
             return jsonify({
                 "success": False,
                 "error": t('api.zepApiKeyMissing')
@@ -127,7 +131,7 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
 def get_entities_by_type(graph_id: str, entity_type: str):
     """获取指定类型的所有实体"""
     try:
-        if not Config.ZEP_API_KEY:
+        if not Config.ZEP_API_KEY and not graph_id.startswith("local_"):
             return jsonify({
                 "success": False,
                 "error": t('api.zepApiKeyMissing')
@@ -162,6 +166,149 @@ def get_entities_by_type(graph_id: str, entity_type: str):
 
 # ============== 模拟管理接口 ==============
 
+@simulation_bp.route('/plan', methods=['POST'])
+def plan_simulation():
+    """Create a domain-general simulation blueprint for a project prompt."""
+    try:
+        data = request.get_json() or {}
+        project_id = data.get('project_id')
+        prompt = (data.get('prompt') or '').strip()
+
+        project = None
+        document_text = ''
+        if project_id:
+            project = ProjectManager.get_project(project_id)
+            if not project:
+                return jsonify({
+                    "success": False,
+                    "error": t('api.projectNotFound', id=project_id)
+                }), 404
+            prompt = prompt or project.simulation_requirement or ''
+            document_text = ProjectManager.get_extracted_text(project_id) or ''
+
+        if not prompt:
+            return jsonify({
+                "success": False,
+                "error": "A prompt or project simulation requirement is required."
+            }), 400
+
+        plan = DomainSimulationPlanner().plan(
+            user_question=prompt,
+            document_text=document_text,
+            project_id=project_id,
+        )
+
+        return jsonify({
+            "success": True,
+            "data": plan
+        })
+    except Exception as e:
+        logger.error(f"Failed to plan simulation: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/generate-agents', methods=['POST'])
+def generate_structured_agents():
+    """Generate structured causal agent shells from a domain simulation plan."""
+    try:
+        data = request.get_json() or {}
+        domain_plan = data.get('domain_plan') or {}
+        if not domain_plan:
+            project_id = data.get('project_id')
+            prompt = data.get('prompt')
+            if not prompt and project_id:
+                project = ProjectManager.get_project(project_id)
+                prompt = project.simulation_requirement if project else None
+            if not prompt:
+                return jsonify({
+                    "success": False,
+                    "error": "domain_plan or prompt is required."
+                }), 400
+            domain_plan = DomainSimulationPlanner().plan(prompt)
+
+        agents = AgentGenerationEngine().generate_agents(
+            domain_plan,
+            use_llm=bool(data.get("use_llm", False)),
+        )
+        return jsonify({
+            "success": True,
+            "data": {
+                "domain": domain_plan.get("domain"),
+                "agents": agents
+            }
+        })
+    except Exception as e:
+        logger.error(f"Failed to generate structured agents: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/state/<simulation_id>', methods=['GET'])
+def get_structured_simulation_state(simulation_id: str):
+    """Return structured simulation state JSON."""
+    try:
+        state = SimulationStateManager.load(simulation_id)
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": "Structured simulation state not found."
+            }), 404
+        return jsonify({
+            "success": True,
+            "data": state.to_dict()
+        })
+    except Exception as e:
+        logger.error(f"Failed to fetch structured simulation state: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/validation/<simulation_id>', methods=['GET'])
+def get_simulation_validation(simulation_id: str):
+    """Validate structured simulation state and persist the validation result."""
+    try:
+        state = SimulationStateManager.load(simulation_id)
+        if not state:
+            validation = {
+                "passed": False,
+                "errors": ["Structured simulation state is missing."],
+                "warnings": [],
+                "missing_agents": [],
+                "missing_variables": [],
+                "missing_dates": [],
+                "missing_scenarios": [],
+                "numeric_quality_score": 0.0,
+            }
+            return jsonify({
+                "success": False,
+                "error": "Structured simulation state not found.",
+                "data": validation
+            }), 404
+
+        validation = NumericValidationService().validate(state.to_dict())
+        SimulationStateManager.update_validation(simulation_id, validation)
+        return jsonify({
+            "success": True,
+            "data": validation
+        })
+    except Exception as e:
+        logger.error(f"Failed to validate structured simulation state: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
 @simulation_bp.route('/create', methods=['POST'])
 def create_simulation():
     """
@@ -172,7 +319,7 @@ def create_simulation():
     请求（JSON）：
         {
             "project_id": "proj_xxxx",      // 必填
-            "graph_id": "mirofish_xxxx",    // 可选，如不提供则从project获取
+            "graph_id": "horizonxl_xxxx",    // 可选，如不提供则从project获取
             "enable_twitter": true,          // 可选，默认true
             "enable_reddit": true            // 可选，默认true
         }
@@ -183,7 +330,7 @@ def create_simulation():
             "data": {
                 "simulation_id": "sim_xxxx",
                 "project_id": "proj_xxxx",
-                "graph_id": "mirofish_xxxx",
+                "graph_id": "horizonxl_xxxx",
                 "status": "created",
                 "enable_twitter": true,
                 "enable_reddit": true,
@@ -222,10 +369,41 @@ def create_simulation():
             enable_twitter=data.get('enable_twitter', True),
             enable_reddit=data.get('enable_reddit', True),
         )
+
+        simulation_requirement = project.simulation_requirement or data.get('prompt') or ''
+        structured_state = None
+        if simulation_requirement:
+            document_text = ProjectManager.get_extracted_text(project_id) or ''
+            domain_plan = DomainSimulationPlanner().plan(
+                user_question=simulation_requirement,
+                document_text=document_text,
+                project_id=project_id,
+            )
+            structured_state = SimulationStateManager.initialize(
+                simulation_id=state.simulation_id,
+                project_id=project_id,
+                domain_plan=domain_plan,
+                agents=AgentGenerationEngine().generate_agents(
+                    domain_plan,
+                    document_text[:8000],
+                    use_llm=bool(data.get("use_llm_agents", False)),
+                ),
+            )
         
+        response_data = state.to_dict()
+        if structured_state:
+            response_data["structured_state"] = {
+                "simulation_id": structured_state.simulation_id,
+                "domain": structured_state.domain_plan.get("domain"),
+                "target_variables": structured_state.domain_plan.get("target_variables", []),
+                "agents": len(structured_state.agents),
+                "time_pockets": len(structured_state.time_pockets),
+                "state_path": "structured_state.json",
+            }
+
         return jsonify({
             "success": True,
-            "data": state.to_dict()
+            "data": response_data
         })
         
     except Exception as e:
@@ -1381,7 +1559,7 @@ def generate_profiles():
     
     请求（JSON）：
         {
-            "graph_id": "mirofish_xxxx",     // 必填
+            "graph_id": "horizonxl_xxxx",     // 必填
             "entity_types": ["Student"],      // 可选
             "use_llm": true,                  // 可选
             "platform": "reddit"              // 可选

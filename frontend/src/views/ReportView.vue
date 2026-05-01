@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">MIROFISH</div>
+        <div class="brand" @click="router.push('/')">HORIZON XL</div>
       </div>
       
       <div class="header-center">
@@ -71,7 +71,7 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step4Report from '../components/Step4Report.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation } from '../api/simulation'
-import { getReport } from '../api/report'
+import { getReport, listReports } from '../api/report'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 
 const route = useRoute()
@@ -151,6 +151,30 @@ const loadReportData = async () => {
     if (reportRes.success && reportRes.data) {
       const reportData = reportRes.data
       simulationId.value = reportData.simulation_id
+
+      // 优先切换到该 simulation 的最佳报告（避免停留在旧失败报告）
+      if (simulationId.value) {
+        const listRes = await listReports({
+          simulation_id: simulationId.value,
+          limit: 20
+        })
+        if (listRes.success && Array.isArray(listRes.data) && listRes.data.length > 0) {
+          const priority = { completed: 0, generating: 1, planning: 2, pending: 3, failed: 9 }
+          const bestReport = [...listRes.data].sort((a, b) => {
+            const pa = priority[a.status] ?? 5
+            const pb = priority[b.status] ?? 5
+            if (pa !== pb) return pa - pb
+            return String(b.created_at || '').localeCompare(String(a.created_at || ''))
+          })[0]
+
+          if (bestReport?.report_id && bestReport.report_id !== currentReportId.value) {
+            addLog(`Switching to latest active report: ${bestReport.report_id}`)
+            currentReportId.value = bestReport.report_id
+            router.replace({ name: 'Report', params: { reportId: bestReport.report_id } })
+            return
+          }
+        }
+      }
 
       if (simulationId.value) {
         // 获取 simulation 信息

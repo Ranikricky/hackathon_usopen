@@ -10,6 +10,7 @@
           </div>
           <div class="step-status">
             <span v-if="currentPhase > 0" class="badge success">{{ $t('step1.ontologyCompleted') }}</span>
+            <span v-else-if="error" class="badge danger">FAILED</span>
             <span v-else-if="currentPhase === 0" class="badge processing">{{ $t('step1.ontologyGenerating') }}</span>
             <span v-else class="badge pending">{{ $t('step1.ontologyPending') }}</span>
           </div>
@@ -21,8 +22,16 @@
             {{ $t('step1.ontologyDesc') }}
           </p>
 
+          <div v-if="error" class="error-callout">
+            <div>
+              <span class="error-title">Generation failed</span>
+              <p class="error-message">{{ error }}</p>
+            </div>
+            <button class="retry-btn" @click="$emit('retry')">Retry</button>
+          </div>
+
           <!-- Loading / Progress -->
-          <div v-if="currentPhase === 0 && ontologyProgress" class="progress-section">
+          <div v-if="!error && currentPhase === 0 && ontologyProgress" class="progress-section">
             <div class="spinner-sm"></div>
             <span>{{ ontologyProgress.message || $t('step1.analyzingDocs') }}</span>
           </div>
@@ -114,6 +123,7 @@
           </div>
           <div class="step-status">
             <span v-if="currentPhase > 1" class="badge success">{{ $t('step1.ontologyCompleted') }}</span>
+            <span v-else-if="error && currentPhase === 1" class="badge danger">FAILED</span>
             <span v-else-if="currentPhase === 1" class="badge processing">{{ buildProgress?.progress || 0 }}%</span>
             <span v-else class="badge pending">{{ $t('step1.ontologyPending') }}</span>
           </div>
@@ -201,19 +211,20 @@ const props = defineProps({
   ontologyProgress: Object,
   buildProgress: Object,
   graphData: Object,
+  error: { type: String, default: '' },
   systemLogs: { type: Array, default: () => [] }
 })
 
-defineEmits(['next-step'])
+defineEmits(['next-step', 'retry'])
 
 const selectedOntologyItem = ref(null)
 const logContent = ref(null)
 const creatingSimulation = ref(false)
 
-// 进入环境搭建 - 创建 simulation 并跳转
+// Create a simulation and move to environment setup.
 const handleEnterEnvSetup = async () => {
   if (!props.projectData?.project_id || !props.projectData?.graph_id) {
-    console.error('缺少项目或图谱信息')
+    console.error('Missing project or graph information')
     return
   }
   
@@ -228,17 +239,17 @@ const handleEnterEnvSetup = async () => {
     })
     
     if (res.success && res.data?.simulation_id) {
-      // 跳转到 simulation 页面
+      // Navigate to the simulation page.
       router.push({
         name: 'Simulation',
         params: { simulationId: res.data.simulation_id }
       })
     } else {
-      console.error('创建模拟失败:', res.error)
+      console.error('Failed to create simulation:', res.error)
       alert(t('step1.createSimulationFailed', { error: res.error || t('common.unknownError') }))
     }
   } catch (err) {
-    console.error('创建模拟异常:', err)
+    console.error('Simulation creation exception:', err)
     alert(t('step1.createSimulationException', { error: err.message }))
   } finally {
     creatingSimulation.value = false
@@ -262,7 +273,6 @@ const formatDate = (dateStr) => {
   return d.toLocaleTimeString('en-US', { hour12: false }) + '.' + d.getMilliseconds()
 }
 
-// Auto-scroll logs
 watch(() => props.systemLogs.length, () => {
   nextTick(() => {
     if (logContent.value) {
@@ -349,6 +359,7 @@ watch(() => props.systemLogs.length, () => {
 .badge.processing { background: #FF5722; color: #FFF; }
 .badge.accent { background: #FF5722; color: #FFF; }
 .badge.pending { background: #F5F5F5; color: #999; }
+.badge.danger { background: #FFEBE6; color: #B83216; }
 
 .api-note {
   font-family: 'JetBrains Mono', monospace;
@@ -639,6 +650,46 @@ watch(() => props.systemLogs.length, () => {
   border-top-color: #FF5722;
   border-radius: 50%;
   animation: spin 1s linear infinite;
+}
+
+.error-callout {
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid #FF6B35;
+  border-radius: 8px;
+  background: #FFF5F1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.error-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 800;
+  color: #B83216;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.error-message {
+  margin: 0;
+  color: #5F2A1A;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.retry-btn {
+  border: none;
+  border-radius: 6px;
+  background: #FF6B35;
+  color: white;
+  font-weight: 800;
+  padding: 8px 12px;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }

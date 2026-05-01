@@ -76,6 +76,8 @@ import warnings
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
+INTERVIEW_STEP_TIMEOUT_SECONDS = 120.0
+
 
 # 全局变量：用于信号处理
 _shutdown_event = None
@@ -333,7 +335,7 @@ class ParallelIPCHandler:
                 action_args={"prompt": prompt}
             )
             actions = {agent: interview_action}
-            await env.step(actions)
+            await asyncio.wait_for(env.step(actions), timeout=INTERVIEW_STEP_TIMEOUT_SECONDS)
             
             result = self._get_interview_result(agent_id, actual_platform)
             result["platform"] = actual_platform
@@ -466,7 +468,10 @@ class ParallelIPCHandler:
                         print(f"  警告: 无法获取Twitter Agent {agent_id}: {e}")
                 
                 if twitter_actions:
-                    await self.twitter_env.step(twitter_actions)
+                    await asyncio.wait_for(
+                        self.twitter_env.step(twitter_actions),
+                        timeout=INTERVIEW_STEP_TIMEOUT_SECONDS
+                    )
                     
                     for interview in twitter_interviews:
                         agent_id = interview.get("agent_id")
@@ -493,7 +498,10 @@ class ParallelIPCHandler:
                         print(f"  警告: 无法获取Reddit Agent {agent_id}: {e}")
                 
                 if reddit_actions:
-                    await self.reddit_env.step(reddit_actions)
+                    await asyncio.wait_for(
+                        self.reddit_env.step(reddit_actions),
+                        timeout=INTERVIEW_STEP_TIMEOUT_SECONDS
+                    )
                     
                     for interview in reddit_interviews:
                         agent_id = interview.get("agent_id")
@@ -1090,6 +1098,32 @@ def get_active_agents_for_round(
     return active_agents
 
 
+def get_time_pocket_for_round(config: Dict[str, Any], round_num: int) -> Dict[str, Any]:
+    """Return sequential time-pocket metadata for a 1-based simulation round."""
+    time_config = config.get("time_config", {})
+    rounds_per_pocket = max(1, int(time_config.get("rounds_per_pocket", 1) or 1))
+    pocket_index = ((max(round_num, 1) - 1) // rounds_per_pocket) + 1
+    round_in_pocket = ((max(round_num, 1) - 1) % rounds_per_pocket) + 1
+    total_pockets = int(time_config.get("total_pockets", 0) or 0)
+    pocket_minutes = int(
+        time_config.get("pocket_duration_minutes")
+        or (int(time_config.get("minutes_per_round", 60) or 60) * rounds_per_pocket)
+    )
+    start_minute = (pocket_index - 1) * pocket_minutes
+    end_minute = pocket_index * pocket_minutes
+    return {
+        "pocket_index": pocket_index,
+        "total_pockets": total_pockets,
+        "round_in_pocket": round_in_pocket,
+        "rounds_per_pocket": rounds_per_pocket,
+        "unit_label": time_config.get("pocket_unit_label", "pocket"),
+        "duration_minutes": pocket_minutes,
+        "start_minute": start_minute,
+        "end_minute": end_minute,
+        "state_carryover": True,
+    }
+
+
 class PlatformSimulation:
     """平台模拟结果容器"""
     def __init__(self):
@@ -1235,6 +1269,7 @@ async def run_twitter_simulation(
         simulated_minutes = round_num * minutes_per_round
         simulated_hour = (simulated_minutes // 60) % 24
         simulated_day = simulated_minutes // (60 * 24) + 1
+        pocket_info = get_time_pocket_for_round(config, round_num + 1)
         
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
@@ -1242,12 +1277,12 @@ async def run_twitter_simulation(
         
         # 无论是否有活跃agent，都记录round开始
         if action_logger:
-            action_logger.log_round_start(round_num + 1, simulated_hour)
+            action_logger.log_round_start(round_num + 1, simulated_hour, pocket_info=pocket_info)
         
         if not active_agents:
             # 没有活跃agent时也记录round结束（actions_count=0）
             if action_logger:
-                action_logger.log_round_end(round_num + 1, 0)
+                action_logger.log_round_end(round_num + 1, 0, pocket_info=pocket_info)
             continue
         
         actions = {agent: LLMAction() for _, agent in active_agents}
@@ -1272,7 +1307,7 @@ async def run_twitter_simulation(
                 round_action_count += 1
         
         if action_logger:
-            action_logger.log_round_end(round_num + 1, round_action_count)
+            action_logger.log_round_end(round_num + 1, round_action_count, pocket_info=pocket_info)
         
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
@@ -1434,6 +1469,7 @@ async def run_reddit_simulation(
         simulated_minutes = round_num * minutes_per_round
         simulated_hour = (simulated_minutes // 60) % 24
         simulated_day = simulated_minutes // (60 * 24) + 1
+        pocket_info = get_time_pocket_for_round(config, round_num + 1)
         
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
@@ -1441,12 +1477,12 @@ async def run_reddit_simulation(
         
         # 无论是否有活跃agent，都记录round开始
         if action_logger:
-            action_logger.log_round_start(round_num + 1, simulated_hour)
+            action_logger.log_round_start(round_num + 1, simulated_hour, pocket_info=pocket_info)
         
         if not active_agents:
             # 没有活跃agent时也记录round结束（actions_count=0）
             if action_logger:
-                action_logger.log_round_end(round_num + 1, 0)
+                action_logger.log_round_end(round_num + 1, 0, pocket_info=pocket_info)
             continue
         
         actions = {agent: LLMAction() for _, agent in active_agents}
@@ -1471,7 +1507,7 @@ async def run_reddit_simulation(
                 round_action_count += 1
         
         if action_logger:
-            action_logger.log_round_end(round_num + 1, round_action_count)
+            action_logger.log_round_end(round_num + 1, round_action_count, pocket_info=pocket_info)
         
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100

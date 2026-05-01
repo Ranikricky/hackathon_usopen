@@ -1,14 +1,18 @@
 services:
   horizonxl:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: horizonxl-local
-    # 加速镜像（如拉取缓慢可替换上方地址）
-    # image: ghcr.nju.edu.cn/666ghj/horizonxl:latest
     container_name: horizonxl
     env_file:
       - .env
+    environment:
+      FLASK_DEBUG: "False"
+      FLASK_HOST: "0.0.0.0"
+      PORT: "5001"
     ports:
-      - "3001:5001"
-      - "5001:5001"
+      - "80:5001"
     restart: unless-stopped
     volumes:
       - ./backend/uploads:/app/backend/uploads

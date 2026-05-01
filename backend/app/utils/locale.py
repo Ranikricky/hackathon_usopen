@@ -27,14 +27,15 @@ def set_locale(locale: str):
 
 def get_locale() -> str:
     if has_request_context():
-        raw = request.headers.get('Accept-Language', 'zh')
-        return raw if raw in _translations else 'zh'
-    return getattr(_thread_local, 'locale', 'zh')
+        raw = request.headers.get('Accept-Language', 'en')
+        return raw if raw in _languages and raw in _translations else 'en'
+    raw = getattr(_thread_local, 'locale', 'en')
+    return raw if raw in _languages and raw in _translations else 'en'
 
 
 def t(key: str, **kwargs) -> str:
     locale = get_locale()
-    messages = _translations.get(locale, _translations.get('zh', {}))
+    messages = _translations.get(locale, _translations.get('en', {}))
 
     value = messages
     for part in key.split('.'):
@@ -45,7 +46,7 @@ def t(key: str, **kwargs) -> str:
             break
 
     if value is None:
-        value = _translations.get('zh', {})
+        value = _translations.get('en', {})
         for part in key.split('.'):
             if isinstance(value, dict):
                 value = value.get(part)
@@ -64,6 +65,7 @@ def t(key: str, **kwargs) -> str:
 
 
 def get_language_instruction() -> str:
-    locale = get_locale()
-    lang_config = _languages.get(locale, _languages.get('zh', {}))
-    return lang_config.get('llmInstruction', '请使用中文回答。')
+    # Product/runtime output is intentionally locked to English for now.
+    # The original project had Chinese prompt paths that could leak Mandarin
+    # into generated reports even when the UI was set to English.
+    return 'Please respond in English only. Do not use Mandarin or Chinese characters.'
