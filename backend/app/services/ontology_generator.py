@@ -210,11 +210,40 @@ Required rules:
     ) -> Dict[str, Any]:
         """Return a safe English ontology when the LLM is unavailable or returns invalid JSON."""
         text = " ".join([simulation_requirement or "", additional_context or "", " ".join(document_texts or [])]).lower()
+        is_election = any(term in text for term in [
+            "election", "assembly", "vote share", "seat share", "turnout", "campaign",
+            "polling", "candidate", "party", "alliance", "constituency", "voter",
+            "bjp", "tmc", "congress", "cpi", "left front", "west bengal", "bengal"
+        ])
         is_macro = any(term in text for term in [
             "unemployment", "macro", "gdp", "inflation", "housing", "federal reserve", "fed", "credit", "recession"
         ])
 
-        if is_macro:
+        if is_election:
+            entity_types = [
+                ("RulingPartyStrategist", "Incumbent party strategist managing campaign decisions."),
+                ("OppositionPartyStrategist", "Opposition party strategist targeting swing voters."),
+                ("AllianceNegotiator", "Actor shaping alliances, seat sharing, and vote transfers."),
+                ("VoterBlocAnalyst", "Analyst representing caste, class, religion, or regional voter blocs."),
+                ("WomenWelfareVoter", "Women voter bloc influenced by welfare delivery and safety issues."),
+                ("YouthEmploymentVoter", "Young voter bloc focused on jobs, migration, and opportunity."),
+                ("RegionalObserver", "Local observer tracking constituency and regional swings."),
+                ("PollsterDataAnalyst", "Election analyst producing vote and seat forecasts."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("MOBILIZES", "Mobilizes or persuades a voter bloc.", "Organization", "VoterBlocAnalyst"),
+                ("TARGETS_REGION", "Focuses campaign effort on a region or constituency.", "Organization", "RegionalObserver"),
+                ("NEGOTIATES_WITH", "Negotiates alliance or seat-sharing terms.", "AllianceNegotiator", "Organization"),
+                ("INFLUENCES_TURNOUT", "Affects turnout behavior for a voter group.", "Organization", "VoterBlocAnalyst"),
+                ("REPORTS_SIGNAL", "Reports polling, turnout, or ground-level signal.", "RegionalObserver", "PollsterDataAnalyst"),
+                ("FORECASTS_RESULT", "Produces vote-share or seat-share forecasts.", "PollsterDataAnalyst", "Organization"),
+                ("REPRESENTS_VOTERS", "Represents lived concerns of a voter bloc.", "Person", "VoterBlocAnalyst"),
+                ("CONTESTS_AGAINST", "Competes electorally against another party.", "Organization", "Organization"),
+            ]
+            summary = "Fallback election ontology for parties, voter blocs, regional observers, alliances, turnout, and polling."
+        elif is_macro:
             entity_types = [
                 ("CentralBankOfficial", "Central bank decision-maker or research staff."),
                 ("GovernmentEconomist", "Government analyst publishing economic assessments."),
