@@ -109,6 +109,10 @@ Fresh generation seed:
 
 Use the seed only to vary secondary character framing, information access,
 and interaction style. Preserve the core causal actors required by the plan.
+Follow agent_population.allocations exactly when it is present: expand an
+archetype into multiple agents when instance_count is greater than 1, use its
+subtypes for variation, and include the orchestration/research agents. Do not
+collapse the roster back to a fixed set of 10 generic agents.
 """
         result = self.llm_client.chat_json(
             messages=[
@@ -169,6 +173,13 @@ and interaction style. Preserve the core causal actors required by the plan.
                     "Revise forecasts when new evidence materially changes state variables, causal assumptions, or scenario likelihoods."
                 ],
             })
+        if len(normalized) < max(1, int(len(fallback) * 0.75)):
+            logger.warning(
+                "Agent engine LLM returned %s agents but population plan requires about %s; using deterministic expansion.",
+                len(normalized),
+                len(fallback),
+            )
+            return fallback
         return normalized or fallback
 
     def _list(self, value: Any) -> List[Any]:

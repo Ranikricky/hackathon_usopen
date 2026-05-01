@@ -128,7 +128,78 @@ def _fetch_url_text(url: str, max_bytes: int = 2_000_000) -> str:
         return ""
 
 
-def _build_local_graph_from_ontology(graph_id: str, ontology: dict) -> dict:
+def _infer_local_agent_population(simulation_requirement: str, entity_names: list[str]) -> dict[str, int]:
+    """Infer local graph node counts from prompt scope and actor-type importance."""
+    text = (simulation_requirement or "").lower()
+    custom_names = [name for name in entity_names if name not in {"Person", "Organization"}]
+    if not custom_names:
+        return {name: 1 for name in entity_names}
+
+    complexity_terms = [
+        "region", "district", "segment", "bloc", "voter", "people", "consumer",
+        "public", "scenario", "seat", "vote share", "turnout", "monthly", "weekly",
+        "data", "research", "web scrape", "poll", "forecast", "uncertainty",
+    ]
+    complexity = sum(1 for term in complexity_terms if term in text)
+    target_count = max(10, min(36, 10 + complexity + max(0, len(custom_names) - 5)))
+
+    control_count = 5
+    fallback_count = sum(1 for name in entity_names if name in {"Person", "Organization"})
+    causal_target = max(len(custom_names), target_count - control_count - fallback_count)
+
+    weights = []
+    for name in custom_names:
+        lowered = name.lower()
+        weight = 1.0
+        if any(term in lowered for term in ["voter", "people", "public", "consumer", "worker", "beneficiary", "household", "patient", "student"]):
+            weight = 3.5
+        elif any(term in lowered for term in ["observer", "analyst", "pollster", "journalist", "field", "booth"]):
+            weight = 1.8
+        elif any(term in lowered for term in ["moderator", "auditor", "research", "synthesizer"]):
+            weight = 0.8
+        weights.append(weight)
+
+    counts = {name: 1 for name in custom_names}
+    remaining = max(0, causal_target - len(custom_names))
+    total_weight = sum(weights) or 1.0
+    extras = [int(remaining * weight / total_weight) for weight in weights]
+    while sum(extras) < remaining:
+        idx = max(range(len(weights)), key=lambda i: weights[i] - extras[i] * 0.01)
+        extras[idx] += 1
+    for name, extra in zip(custom_names, extras):
+        counts[name] += extra
+
+    for name in entity_names:
+        if name in {"Person", "Organization"}:
+            counts[name] = 1
+    return counts
+
+
+def _local_instance_name(entity_name: str, copy_index: int, total: int, simulation_requirement: str) -> str:
+    """Create a readable instance name for repeated local graph agents."""
+    if total <= 1:
+        return entity_name
+    lowered = entity_name.lower()
+    if "voter" in lowered or "beneficiary" in lowered or "people" in lowered:
+        labels = ["Rural", "Urban", "Youth", "Women", "Minority", "Regional", "Swing", "Working-class"]
+    elif "observer" in lowered:
+        labels = ["North", "South", "Urban", "Rural", "Border", "Industrial", "Field", "District"]
+    elif "analyst" in lowered or "pollster" in lowered:
+        labels = ["Model", "Ground", "Survey", "Regional", "Skeptical", "Turnout", "Scenario", "Data"]
+    elif "strategist" in lowered or "campaign" in lowered:
+        labels = ["Core", "Field", "Media", "Data", "Regional", "Alliance", "Turnout", "Opposition"]
+    else:
+        labels = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    label = labels[(copy_index - 1) % len(labels)]
+    return f"{label} {entity_name} {copy_index}"
+
+
+def _build_local_graph_from_ontology(
+    graph_id: str,
+    ontology: dict,
+    simulation_requirement: str = "",
+    generation_seed: str = "",
+) -> dict:
     """
     Build a local graph from the ontology when Zep is not configured.
     This keeps the local demo and workflow usable.
@@ -137,23 +208,62 @@ def _build_local_graph_from_ontology(graph_id: str, ontology: dict) -> dict:
     edge_types = ontology.get("edge_types", []) or []
 
     nodes = []
-    entity_uuid_map: dict[str, str] = {}
+    entity_uuid_map: dict[str, list[str]] = {}
+    entity_names = [(entity or {}).get("name") or f"EntityType{idx}" for idx, entity in enumerate(entity_types, start=1)]
+    instance_counts = _infer_local_agent_population(simulation_requirement, entity_names)
 
+    node_idx = 0
     for idx, entity in enumerate(entity_types, start=1):
         entity_name = (entity or {}).get("name") or f"EntityType{idx}"
-        node_uuid = f"{graph_id}_node_{idx:03d}"
-        entity_uuid_map[entity_name] = node_uuid
+        count = max(1, min(20, int(instance_counts.get(entity_name, 1))))
+        entity_uuid_map.setdefault(entity_name, [])
 
         attr_defs = (entity or {}).get("attributes", []) or []
-        attributes = {str(a.get("name")): "" for a in attr_defs if a.get("name")}
-        attributes["schema_type"] = True
+        for copy_index in range(1, count + 1):
+            node_idx += 1
+            node_uuid = f"{graph_id}_node_{node_idx:03d}"
+            entity_uuid_map[entity_name].append(node_uuid)
+            attributes = {str(a.get("name")): "" for a in attr_defs if a.get("name")}
+            attributes.update({
+                "schema_type": copy_index == 1,
+                "agent_instance": True,
+                "instance_index": copy_index,
+                "instance_count": count,
+                "generation_seed": generation_seed,
+            })
 
+            nodes.append({
+                "uuid": node_uuid,
+                "name": _local_instance_name(entity_name, copy_index, count, simulation_requirement),
+                "labels": ["Entity", entity_name],
+                "summary": (entity or {}).get("description", ""),
+                "attributes": attributes,
+                "created_at": None,
+            })
+
+    control_nodes = [
+        ("SimulationModerator", "Keeps the discussion focused and manages turn-taking."),
+        ("EvidenceAuditor", "Checks claims against graph evidence and approved external research."),
+        ("ExternalResearchScout", "Fetches or summarizes approved external web/source pointers outside graph memory."),
+        ("DataRetrievalAnalyst", "Extracts numbers, units, dates, and missing-data warnings."),
+        ("QuantitativeSynthesizer", "Turns agent positions into numeric scenario tables and confidence bands."),
+    ]
+    for entity_name, description in control_nodes:
+        if entity_name in entity_uuid_map:
+            continue
+        node_idx += 1
+        node_uuid = f"{graph_id}_node_{node_idx:03d}"
+        entity_uuid_map[entity_name] = [node_uuid]
         nodes.append({
             "uuid": node_uuid,
             "name": entity_name,
             "labels": ["Entity", entity_name],
-            "summary": (entity or {}).get("description", ""),
-            "attributes": attributes,
+            "summary": description,
+            "attributes": {
+                "agent_instance": True,
+                "orchestration_agent": True,
+                "generation_seed": generation_seed,
+            },
             "created_at": None,
         })
 
@@ -166,27 +276,31 @@ def _build_local_graph_from_ontology(graph_id: str, ontology: dict) -> dict:
         for st in source_targets:
             source_name = (st or {}).get("source")
             target_name = (st or {}).get("target")
-            source_uuid = entity_uuid_map.get(source_name)
-            target_uuid = entity_uuid_map.get(target_name)
-            if not source_uuid or not target_uuid:
+            source_uuids = entity_uuid_map.get(source_name) or []
+            target_uuids = entity_uuid_map.get(target_name) or []
+            if not source_uuids or not target_uuids:
                 continue
-            edge_idx += 1
-            edges.append({
-                "uuid": f"{graph_id}_edge_{edge_idx:04d}",
-                "name": edge_name,
-                "fact": edge_fact,
-                "fact_type": edge_name,
-                "source_node_uuid": source_uuid,
-                "target_node_uuid": target_uuid,
-                "source_node_name": source_name,
-                "target_node_name": target_name,
-                "attributes": {"schema_relation": True},
-                "created_at": None,
-                "valid_at": None,
-                "invalid_at": None,
-                "expired_at": None,
-                "episodes": [],
-            })
+            max_links = min(max(len(source_uuids), len(target_uuids)), 12)
+            for link_idx in range(max_links):
+                source_uuid = source_uuids[link_idx % len(source_uuids)]
+                target_uuid = target_uuids[link_idx % len(target_uuids)]
+                edge_idx += 1
+                edges.append({
+                    "uuid": f"{graph_id}_edge_{edge_idx:04d}",
+                    "name": edge_name,
+                    "fact": edge_fact,
+                    "fact_type": edge_name,
+                    "source_node_uuid": source_uuid,
+                    "target_node_uuid": target_uuid,
+                    "source_node_name": source_name,
+                    "target_node_name": target_name,
+                    "attributes": {"schema_relation": link_idx == 0, "agent_instance_relation": True},
+                    "created_at": None,
+                    "valid_at": None,
+                    "invalid_at": None,
+                    "expired_at": None,
+                    "episodes": [],
+                })
 
     return {
         "graph_id": graph_id,
@@ -195,6 +309,10 @@ def _build_local_graph_from_ontology(graph_id: str, ontology: dict) -> dict:
         "node_count": len(nodes),
         "edge_count": len(edges),
         "mode": "local_ontology_fallback",
+        "agent_population": {
+            "inferred_instance_counts": instance_counts,
+            "control_agents": [name for name, _ in control_nodes],
+        },
     }
 
 
@@ -546,7 +664,12 @@ def build_graph():
             )
 
             graph_id = f"local_{uuid.uuid4().hex[:16]}"
-            graph_data = _build_local_graph_from_ontology(graph_id, ontology)
+            graph_data = _build_local_graph_from_ontology(
+                graph_id,
+                ontology,
+                simulation_requirement=project.simulation_requirement or "",
+                generation_seed=project.generation_seed or "",
+            )
             ProjectManager.save_local_graph(project_id, graph_data)
 
             project.graph_id = graph_id

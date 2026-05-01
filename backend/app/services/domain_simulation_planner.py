@@ -63,6 +63,46 @@ DEFAULT_VALIDATION_REQUIREMENTS = [
 ]
 
 
+ORCHESTRATION_AGENT_TEMPLATES = [
+    {
+        "name": "Simulation Moderator",
+        "role": "Keeps the discussion on the simulation question, enforces turn order, and summarizes unresolved disagreements.",
+        "count": 1,
+        "numeric_output_required": False,
+    },
+    {
+        "name": "Evidence Auditor",
+        "role": "Checks whether claims are supported by graph evidence, uploaded context, or explicitly supplied external research pointers.",
+        "count": 1,
+        "numeric_output_required": False,
+    },
+    {
+        "name": "Quantitative Synthesizer",
+        "role": "Converts agent claims into numeric paths, confidence bands, disagreement ranges, and missing-data warnings.",
+        "count": 1,
+        "numeric_output_required": True,
+    },
+]
+
+
+RESEARCH_AGENT_TEMPLATES = [
+    {
+        "name": "External Research Scout",
+        "role": "Collects fresh context from user-provided URLs or approved scraping/search tools outside the graph.",
+        "count": 1,
+        "external_to_graph": True,
+        "numeric_output_required": False,
+    },
+    {
+        "name": "Data Retrieval Analyst",
+        "role": "Looks for numeric tables, dates, units, source caveats, and data gaps needed by the simulation.",
+        "count": 1,
+        "external_to_graph": True,
+        "numeric_output_required": True,
+    },
+]
+
+
 DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
     "macro": {
         "target_variables": [
@@ -97,12 +137,12 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
             {"name": "turnout_energy", "unit": "index", "directional_interpretation": "Higher means stronger likely turnout.", "required": True},
         ],
         "agents": [
-            ("Voter Blocs", "Shift turnout and vote choice.", "Local sentiment and issue salience.", "May be poorly sampled."),
-            ("Campaign Strategists", "Allocate resources and shape messaging.", "Internal polling and field data.", "May overrate campaign impact."),
-            ("Pollsters", "Measure public opinion.", "Survey data and weighting models.", "May miss turnout composition."),
-            ("Media", "Frames race dynamics and scandals.", "Narrative reach and attention.", "May amplify short-term swings."),
-            ("Donors", "Move resources and elite signals.", "Fundraising flows and elite confidence.", "May herd around momentum."),
-            ("Opposition Campaign", "Creates counter-messaging and attacks.", "Opponent research and tactical plans.", "May misread voter priorities."),
+            ("Voter Blocs", "Shift turnout and vote choice.", "Local sentiment and issue salience.", "May be poorly sampled.", 0.50, ["rural welfare voters", "urban middle-class voters", "minority voters", "youth/job-seeking voters", "regional swing voters"]),
+            ("Campaign Strategists", "Allocate resources and shape messaging.", "Internal polling and field data.", "May overrate campaign impact.", 0.14, ["incumbent strategist", "main opposition strategist"]),
+            ("Pollsters", "Measure public opinion.", "Survey data and weighting models.", "May miss turnout composition.", 0.10, ["survey pollster", "exit-poll analyst", "seat modeler"]),
+            ("Media", "Frames race dynamics and scandals.", "Narrative reach and attention.", "May amplify short-term swings.", 0.08, ["local journalist", "national political journalist"]),
+            ("Field Workers", "Report booth-level turnout, mobilization, and last-mile signals.", "Ground organization and polling-day feedback.", "May overread their own booth network.", 0.10, ["booth worker", "district organizer", "civil society observer"]),
+            ("Alliance and Smaller Party Actors", "Influence vote splits, tactical transfers, and coalition math.", "Seat-sharing and local candidate strength.", "May overstate bargaining power.", 0.08, ["alliance negotiator", "minor-party broker"]),
         ],
         "granularity": "weekly",
     },
@@ -147,6 +187,110 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "granularity": "quarterly",
     },
 }
+
+DOMAIN_TEMPLATES.update({
+    "geopolitics": {
+        "target_variables": [
+            {"name": "escalation_probability", "unit": "probability", "required": True, "description": "Probability of escalation or de-escalation over the horizon."},
+            {"name": "policy_shift_index", "unit": "index", "required": True, "description": "Magnitude of expected diplomatic, military, or sanctions policy change."},
+            {"name": "market_or_public_risk_impact", "unit": "index", "required": False, "description": "Downstream risk impact on markets or public conditions."},
+        ],
+        "state_variables": [
+            {"name": "military_pressure", "unit": "index", "directional_interpretation": "Higher means greater conflict pressure.", "required": True},
+            {"name": "diplomatic_channel_strength", "unit": "index", "directional_interpretation": "Higher means more credible de-escalation channels.", "required": True},
+            {"name": "domestic_political_constraint", "unit": "index", "directional_interpretation": "Higher means leaders have less room to compromise.", "required": False},
+        ],
+        "agents": [
+            ("State Decision Makers", "Set military, diplomatic, or sanctions strategy.", "Internal policy constraints and red lines.", "May posture publicly.", 0.22, ["incumbent government", "rival government"]),
+            ("Military and Security Actors", "Create facts on the ground and escalation risks.", "Operational readiness and incident data.", "May overstate deterrence.", 0.18, ["military command", "intelligence analyst"]),
+            ("Diplomats and Mediators", "Transmit offers, constraints, and off-ramps.", "Back-channel information.", "May overrate negotiated outcomes.", 0.14, ["formal diplomat", "third-party mediator"]),
+            ("Allies and External Powers", "Shift incentives through support or pressure.", "Alliance commitments and aid signals.", "May pursue own agenda.", 0.16, ["ally government", "regional power"]),
+            ("Affected Public and Civil Society", "Shape legitimacy, protest, migration, and humanitarian pressure.", "Ground-level lived impact.", "May be under-sampled.", 0.20, ["border community", "urban public", "diaspora voice"]),
+            ("Media and Risk Analysts", "Frame narratives and assess probabilities.", "Open-source signals and market reaction.", "May overweight visible events.", 0.10, ["local journalist", "OSINT analyst"]),
+        ],
+        "granularity": "event_triggered",
+    },
+    "market": {
+        "target_variables": [
+            {"name": "price_level", "unit": "index", "required": True, "description": "Primary market price or index path."},
+            {"name": "volatility", "unit": "percent", "required": True, "description": "Expected volatility or uncertainty."},
+            {"name": "liquidity_stress", "unit": "index", "required": False, "description": "Market depth and funding stress."},
+        ],
+        "state_variables": [
+            {"name": "risk_appetite", "unit": "index", "directional_interpretation": "Higher means stronger demand for risk assets.", "required": True},
+            {"name": "positioning_pressure", "unit": "index", "directional_interpretation": "Higher means crowded positioning or forced-flow risk.", "required": True},
+        ],
+        "agents": [
+            ("Long-Only Investors", "Allocate capital based on fundamentals and mandates.", "Portfolio flows and benchmark constraints.", "May be slow to reduce exposure.", 0.22, ["institutional investor", "retail investor"]),
+            ("Hedge Funds and Traders", "Move near-term price through positioning.", "Flow, options, and liquidity signals.", "May overreact to catalysts.", 0.18, ["macro trader", "event-driven trader"]),
+            ("Issuers and Corporates", "Affect supply, buybacks, guidance, and credit quality.", "Internal operating data.", "May smooth negative news.", 0.16, ["corporate issuer", "credit officer"]),
+            ("Policy and Central Bank Watchers", "Interpret rates, regulation, and liquidity.", "Policy reaction function.", "May overfit central-bank language.", 0.14, ["rates strategist", "regulatory analyst"]),
+            ("Retail/Public Sentiment", "Creates momentum, panic, or adoption waves.", "Social and brokerage behavior.", "May be reflexive.", 0.20, ["optimistic retail cohort", "panic-selling cohort"]),
+            ("Market Data Analysts", "Extract numbers and scenario paths.", "Prices, volumes, spreads, and option surfaces.", "May miss narrative shocks.", 0.10, ["quant analyst", "liquidity analyst"]),
+        ],
+        "granularity": "weekly",
+    },
+    "business": {
+        "target_variables": [
+            {"name": "revenue_growth", "unit": "percent", "required": True, "description": "Expected revenue growth path."},
+            {"name": "market_share", "unit": "percent", "required": True, "description": "Expected share of target market."},
+            {"name": "margin", "unit": "percent", "required": False, "description": "Profitability or contribution margin path."},
+        ],
+        "state_variables": [
+            {"name": "customer_demand", "unit": "index", "directional_interpretation": "Higher means stronger demand.", "required": True},
+            {"name": "competitive_pressure", "unit": "index", "directional_interpretation": "Higher means stronger competitive threat.", "required": True},
+        ],
+        "agents": [
+            ("Leadership Team", "Sets strategy, investment, pricing, and positioning.", "Internal goals and constraints.", "May defend existing plans.", 0.16, ["CEO view", "finance view"]),
+            ("Customer Segments", "Determine adoption, churn, and willingness to pay.", "Lived buyer friction and needs.", "May vary sharply by segment.", 0.34, ["enterprise buyer", "SMB buyer", "price-sensitive customer", "power user"]),
+            ("Sales and Channel Teams", "Translate demand into pipeline and conversion.", "Pipeline, objections, and channel feedback.", "May overstate close probability.", 0.14, ["field sales", "channel partner"]),
+            ("Competitors", "Change pricing, features, and distribution.", "Competitive moves and incentives.", "May trigger retaliation.", 0.16, ["incumbent competitor", "new entrant"]),
+            ("Product and Operations", "Controls delivery quality and roadmap.", "Build capacity and bottlenecks.", "May underweight market narrative.", 0.12, ["product lead", "operations lead"]),
+            ("Investors and Analysts", "Frame expectations and capital access.", "Capital market sentiment.", "May prefer short-term metrics.", 0.08, ["board investor", "industry analyst"]),
+        ],
+        "granularity": "monthly",
+    },
+    "consumer": {
+        "target_variables": [
+            {"name": "demand_index", "unit": "index", "required": True, "description": "Demand or adoption path for the product/category."},
+            {"name": "purchase_intent", "unit": "percent", "required": True, "description": "Share likely to buy or switch."},
+            {"name": "price_sensitivity", "unit": "index", "required": False, "description": "Sensitivity to price changes."},
+        ],
+        "state_variables": [
+            {"name": "consumer_confidence", "unit": "index", "directional_interpretation": "Higher means stronger willingness to spend.", "required": True},
+            {"name": "trend_velocity", "unit": "index", "directional_interpretation": "Higher means faster narrative or taste spread.", "required": True},
+        ],
+        "agents": [
+            ("Consumer Segments", "Drive category demand, switching, and retention.", "Ground-level preferences and budget pressure.", "May be heterogeneous.", 0.46, ["value seeker", "premium buyer", "youth trend adopter", "family household", "loyal customer"]),
+            ("Retailers and Channels", "Control shelf space, availability, and promotions.", "Store traffic and sell-through.", "May optimize locally.", 0.14, ["offline retailer", "online marketplace"]),
+            ("Brands and Marketers", "Shape positioning and campaigns.", "Brand strategy and budget.", "May overrate messaging.", 0.14, ["incumbent brand", "challenger brand"]),
+            ("Influencers and Media", "Accelerate narratives and social proof.", "Attention and sentiment signals.", "May amplify fads.", 0.10, ["creator", "review outlet"]),
+            ("Suppliers and Operators", "Constrain availability, price, and quality.", "Inventory and logistics.", "May lag demand swings.", 0.08, ["supplier", "store operator"]),
+            ("Consumer Researchers", "Measure behavior and forecast demand.", "Survey, panel, and transaction data.", "May miss fast-moving subcultures.", 0.08, ["survey researcher", "data analyst"]),
+        ],
+        "granularity": "monthly",
+    },
+    "policy": {
+        "target_variables": [
+            {"name": "policy_passage_probability", "unit": "probability", "required": True, "description": "Probability that the policy is enacted or implemented."},
+            {"name": "impact_index", "unit": "index", "required": True, "description": "Expected magnitude of policy impact."},
+            {"name": "compliance_cost", "unit": "currency or index", "required": False, "description": "Expected cost for affected parties."},
+        ],
+        "state_variables": [
+            {"name": "political_support", "unit": "index", "directional_interpretation": "Higher means stronger support.", "required": True},
+            {"name": "implementation_capacity", "unit": "index", "directional_interpretation": "Higher means easier implementation.", "required": True},
+        ],
+        "agents": [
+            ("Policymakers", "Draft, negotiate, and pass policy.", "Legislative priorities and vote counts.", "May overstate feasibility.", 0.20, ["ruling coalition", "opposition lawmaker"]),
+            ("Regulators and Agencies", "Implement and enforce rules.", "Administrative capacity and enforcement data.", "May protect jurisdiction.", 0.16, ["agency official", "enforcement officer"]),
+            ("Affected Citizens", "Create public pressure and real-world impact.", "Lived costs and benefits.", "May be unevenly represented.", 0.28, ["beneficiary", "taxpayer", "worker", "local community"]),
+            ("Industry and Lobby Groups", "Influence details and compliance behavior.", "Operational cost and lobbying channels.", "May understate public benefits.", 0.16, ["industry association", "large firm"]),
+            ("Courts and Watchdogs", "Constrain legality and accountability.", "Legal challenge risk.", "May slow implementation.", 0.10, ["court observer", "civil society watchdog"]),
+            ("Policy Analysts and Media", "Estimate impact and shape narrative.", "Data, models, and public framing.", "May focus on salient controversies.", 0.10, ["policy analyst", "journalist"]),
+        ],
+        "granularity": "event_triggered",
+    },
+})
 
 
 class DomainSimulationPlanner:
@@ -207,7 +351,7 @@ class DomainSimulationPlanner:
         prompt = f"""
 Create a simulation blueprint using exactly this top-level schema:
 {{
-  "domain": "macro | election | oil | ai_future | geopolitics | market | social | business | other",
+  "domain": "macro | election | oil | ai_future | geopolitics | market | social | business | healthcare | climate | real_estate | crypto | supply_chain | education | policy | technology | sports | consumer | other",
   "user_question": "...",
   "target_variables": [
     {{"name": "...", "unit": "...", "required": true, "description": "..."}}
@@ -223,9 +367,44 @@ Create a simulation blueprint using exactly this top-level schema:
       "causal_role": "...",
       "information_advantage": "...",
       "likely_bias": "...",
+      "population_share": 0.25,
+      "subtypes": ["..."],
       "numeric_output_required": true
     }}
   ],
+  "agent_population": {{
+    "target_agent_count": 18,
+    "allocation_basis": "Explain why some archetypes need multiple agents.",
+    "allocations": [
+      {{
+        "archetype_name": "...",
+        "population_share": 0.5,
+        "instance_count": 6,
+        "rationale": "...",
+        "subtypes": ["..."]
+      }}
+    ],
+    "orchestration_agents": [
+      {{"name": "Simulation Moderator", "role": "Keeps debate focused.", "count": 1, "numeric_output_required": false}},
+      {{"name": "Evidence Auditor", "role": "Checks claims against evidence.", "count": 1, "numeric_output_required": false}},
+      {{"name": "Quantitative Synthesizer", "role": "Builds numeric scenario tables.", "count": 1, "numeric_output_required": true}}
+    ],
+    "research_agents": [
+      {{"name": "External Research Scout", "role": "Collects approved external source pointers outside the graph.", "count": 1, "external_to_graph": true, "numeric_output_required": false}},
+      {{"name": "Data Retrieval Analyst", "role": "Extracts numbers, units, dates, and data gaps.", "count": 1, "external_to_graph": true, "numeric_output_required": true}}
+    ]
+  }},
+  "discussion_architecture": {{
+    "moderated": true,
+    "loop": ["moderator frames the pocket", "research/data agents inject evidence", "causal agents revise", "numeric synthesizer aggregates", "evidence auditor flags gaps"],
+    "anti_drift_rules": ["Every round must reference target variables."]
+  }},
+  "external_research_policy": {{
+    "enabled": true,
+    "outside_graph": true,
+    "allowed_inputs": ["user_provided_urls", "uploaded_files", "approved_search_or_scraping_tool_results"],
+    "injection_point": "before each debate pocket and before numeric synthesis"
+  }},
   "state_variables": [
     {{
       "name": "...",
@@ -254,6 +433,12 @@ User question:
 
 Uploaded/project context excerpt:
 {context_excerpt}
+
+Planning rules:
+- Do not assume exactly 10 agents. Decide target_agent_count from domain complexity, number of target variables, time horizon, and how much the outcome depends on mass/public behavior.
+- If voters, consumers, workers, households, patients, students, or common people drive the outcome, allocate multiple instances and subtypes to that archetype instead of one token representative.
+- Always include moderator/evidence/numeric/research control roles in agent_population; these are process agents, not causal stakeholder agents.
+- Research agents collect source pointers outside graph memory and inject them between debate rounds; the graph remains the durable evidence memory.
 """
         return self.llm_client.chat_json(
             messages=[
@@ -273,11 +458,17 @@ Uploaded/project context excerpt:
                 "causal_role": causal_role,
                 "information_advantage": info,
                 "likely_bias": bias,
+                "population_share": share if isinstance(share, (int, float)) else None,
+                "subtypes": subtypes if isinstance(subtypes, list) else [],
                 "numeric_output_required": True,
             }
-            for name, causal_role, info, bias in template["agents"]
+            for name, causal_role, info, bias, *rest in template["agents"]
+            for share, subtypes in [(
+                rest[0] if len(rest) > 0 else None,
+                rest[1] if len(rest) > 1 else [],
+            )]
         ]
-        return self._normalize_plan({
+        plan = self._normalize_plan({
             "domain": domain,
             "user_question": user_question,
             "target_variables": template["target_variables"],
@@ -292,6 +483,10 @@ Uploaded/project context excerpt:
             "required_outputs": list(DEFAULT_REQUIRED_OUTPUTS),
             "validation_requirements": list(DEFAULT_VALIDATION_REQUIREMENTS),
         }, user_question)
+        plan["agent_population"] = self._build_agent_population_plan(user_question, domain, plan["required_agent_archetypes"])
+        plan["discussion_architecture"] = self._build_discussion_architecture(user_question)
+        plan["external_research_policy"] = self._build_external_research_policy(user_question)
+        return plan
 
     def _normalize_plan(self, raw: Dict[str, Any], user_question: str) -> Dict[str, Any]:
         plan = raw if isinstance(raw, dict) else {}
@@ -311,6 +506,14 @@ Uploaded/project context excerpt:
             "required_outputs": self._ensure_list(plan.get("required_outputs"), DEFAULT_REQUIRED_OUTPUTS),
             "validation_requirements": self._ensure_list(plan.get("validation_requirements"), DEFAULT_VALIDATION_REQUIREMENTS),
         }
+        normalized["agent_population"] = self._normalize_agent_population(
+            plan.get("agent_population"),
+            normalized["required_agent_archetypes"],
+            normalized["domain"],
+            user_question,
+        )
+        normalized["discussion_architecture"] = plan.get("discussion_architecture") or self._build_discussion_architecture(user_question)
+        normalized["external_research_policy"] = plan.get("external_research_policy") or self._build_external_research_policy(user_question)
         return normalized
 
     def _fallback_plan_without_llm(self, domain: str, user_question: str) -> Dict[str, Any]:
@@ -326,9 +529,15 @@ Uploaded/project context excerpt:
                     "causal_role": causal_role,
                     "information_advantage": info,
                     "likely_bias": bias,
+                    "population_share": share if isinstance(share, (int, float)) else None,
+                    "subtypes": subtypes if isinstance(subtypes, list) else [],
                     "numeric_output_required": True,
                 }
-                for name, causal_role, info, bias in template["agents"]
+                for name, causal_role, info, bias, *rest in template["agents"]
+                for share, subtypes in [(
+                    rest[0] if len(rest) > 0 else None,
+                    rest[1] if len(rest) > 1 else [],
+                )]
             ],
             "state_variables": template["state_variables"],
         }
@@ -434,6 +643,9 @@ Uploaded/project context excerpt:
                 "causal_role": str(item.get("causal_role") or "Influences the target outcome."),
                 "information_advantage": str(item.get("information_advantage") or "Has relevant domain evidence."),
                 "likely_bias": str(item.get("likely_bias") or "May overweight familiar information."),
+                "population_share": item.get("population_share"),
+                "instance_count": item.get("instance_count"),
+                "subtypes": self._ensure_list(item.get("subtypes"), []),
                 "numeric_output_required": bool(item.get("numeric_output_required", True)),
             })
         return out or [{
@@ -441,6 +653,9 @@ Uploaded/project context excerpt:
             "causal_role": "Interprets evidence and forecasts the target outcome.",
             "information_advantage": "Broad evidence synthesis.",
             "likely_bias": "May smooth uncertainty into consensus.",
+            "population_share": 1.0,
+            "instance_count": 1,
+            "subtypes": [],
             "numeric_output_required": True,
         }]
 
@@ -465,3 +680,164 @@ Uploaded/project context excerpt:
         if not isinstance(value, list) or not value:
             return list(fallback)
         return [str(item) for item in value if str(item).strip()] or list(fallback)
+
+    def _normalize_agent_population(
+        self,
+        value: Any,
+        archetypes: List[Dict[str, Any]],
+        domain: str,
+        user_question: str,
+    ) -> Dict[str, Any]:
+        if isinstance(value, dict) and value.get("allocations"):
+            population = dict(value)
+            population.setdefault("target_agent_count", self._infer_target_agent_count(user_question, domain, archetypes))
+            population.setdefault("orchestration_agents", deepcopy(ORCHESTRATION_AGENT_TEMPLATES))
+            population.setdefault("research_agents", deepcopy(RESEARCH_AGENT_TEMPLATES))
+            population.setdefault("allocation_basis", "Planner supplied allocation normalized by Horizon XL.")
+            return population
+        return self._build_agent_population_plan(user_question, domain, archetypes)
+
+    def _build_agent_population_plan(
+        self,
+        user_question: str,
+        domain: str,
+        archetypes: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        target_count = self._infer_target_agent_count(user_question, domain, archetypes)
+        orchestration_count = sum(int(a.get("count", 1)) for a in ORCHESTRATION_AGENT_TEMPLATES)
+        research_count = sum(int(a.get("count", 1)) for a in RESEARCH_AGENT_TEMPLATES)
+        causal_slots = max(len(archetypes), target_count - orchestration_count - research_count)
+
+        shares = self._normalized_population_shares(archetypes, domain, user_question)
+        allocations = []
+        remaining = causal_slots
+        for idx, archetype in enumerate(archetypes):
+            if idx == len(archetypes) - 1:
+                count = max(1, remaining)
+            else:
+                count = max(1, round(causal_slots * shares[idx]))
+                remaining -= count
+            archetype["instance_count"] = count
+            archetype["population_share"] = round(shares[idx], 3)
+            allocations.append({
+                "archetype_name": archetype.get("name", f"Archetype {idx + 1}"),
+                "population_share": round(shares[idx], 3),
+                "instance_count": count,
+                "rationale": self._allocation_rationale(archetype, domain),
+                "subtypes": archetype.get("subtypes") or self._default_subtypes(archetype.get("name", ""), domain),
+            })
+
+        return {
+            "target_agent_count": target_count,
+            "causal_agent_count": sum(item["instance_count"] for item in allocations),
+            "allocation_basis": (
+                "Agent count is inferred from scope, number of target variables, domain complexity, "
+                "and whether mass public/consumer/voter behavior drives the outcome."
+            ),
+            "allocations": allocations,
+            "orchestration_agents": deepcopy(ORCHESTRATION_AGENT_TEMPLATES),
+            "research_agents": deepcopy(RESEARCH_AGENT_TEMPLATES),
+        }
+
+    def _infer_target_agent_count(self, user_question: str, domain: str, archetypes: List[Dict[str, Any]]) -> int:
+        text = user_question.lower()
+        complexity_terms = [
+            "region", "scenario", "segment", "bloc", "state", "district", "country",
+            "monthly", "weekly", "daily", "next", "years", "seats", "vote share",
+            "turnout", "supply", "demand", "geopolitical", "policy", "consumer",
+            "poll", "web scrape", "research", "numeric", "forecast",
+        ]
+        score = sum(1 for term in complexity_terms if term in text)
+        base = 12 if domain in {"election", "geopolitics", "consumer", "social"} else 10
+        target = base + min(16, score) + max(0, len(archetypes) - 5)
+        if any(term in text for term in ["vast", "broad", "all possible", "multiple scenarios", "full context"]):
+            target += 6
+        return max(8, min(40, target))
+
+    def _normalized_population_shares(
+        self,
+        archetypes: List[Dict[str, Any]],
+        domain: str,
+        user_question: str,
+    ) -> List[float]:
+        if not archetypes:
+            return [1.0]
+        explicit = [
+            item.get("population_share")
+            for item in archetypes
+            if isinstance(item.get("population_share"), (int, float)) and item.get("population_share") > 0
+        ]
+        if len(explicit) == len(archetypes):
+            total = sum(float(x) for x in explicit) or 1.0
+            return [float(x) / total for x in explicit]
+
+        weights = []
+        text = user_question.lower()
+        for item in archetypes:
+            name = str(item.get("name", "")).lower()
+            weight = 1.0
+            if any(term in name for term in ["voter", "people", "public", "consumer", "household", "worker", "patient", "student"]):
+                weight = 3.0 if domain in {"election", "consumer", "social", "healthcare", "education"} else 2.0
+            if any(term in name for term in ["pollster", "analyst", "expert", "media"]):
+                weight = max(weight, 1.2)
+            if any(term in name for term in ["moderator", "auditor", "research", "synthesizer"]):
+                weight = 0.8
+            weights.append(weight)
+
+        if any(term in text for term in ["people", "voter", "consumer", "public", "common people", "turnout"]):
+            weights = [
+                weight * 1.8 if any(term in str(item.get("name", "")).lower() for term in ["voter", "people", "public", "consumer", "household", "worker"]) else weight
+                for weight, item in zip(weights, archetypes)
+            ]
+        total = sum(weights) or 1.0
+        return [weight / total for weight in weights]
+
+    def _default_subtypes(self, archetype_name: str, domain: str) -> List[str]:
+        name = archetype_name.lower()
+        if domain == "election" and any(term in name for term in ["voter", "people", "public"]):
+            return ["rural voter", "urban voter", "minority voter", "youth voter", "women welfare voter", "regional swing voter"]
+        if any(term in name for term in ["consumer", "public", "people"]):
+            return ["price-sensitive participant", "loyal participant", "skeptical participant", "high-engagement participant"]
+        if "analyst" in name or "pollster" in name:
+            return ["model-based analyst", "ground-signal analyst", "skeptical analyst"]
+        return []
+
+    def _allocation_rationale(self, archetype: Dict[str, Any], domain: str) -> str:
+        name = archetype.get("name", "Agent")
+        share = archetype.get("population_share")
+        if isinstance(share, (int, float)):
+            return f"{name} receives {share:.0%} style representation because this role materially moves the {domain} outcome."
+        return f"{name} receives representation based on causal relevance and information advantage."
+
+    def _build_discussion_architecture(self, user_question: str) -> Dict[str, Any]:
+        return {
+            "moderated": True,
+            "loop": [
+                "moderator frames the pocket question",
+                "research/data agents inject new permitted evidence",
+                "causal agents update positions and numbers",
+                "mediator summarizes disagreements and unresolved questions",
+                "quantitative synthesizer produces scenario tables",
+                "evidence auditor blocks unsupported claims or flags missing data",
+            ],
+            "anti_drift_rules": [
+                "Every round must reference the target variables or state variables.",
+                "Claims that require data must be routed to research/data agents.",
+                "The moderator must restate unresolved disagreements before the next pocket.",
+                "Report generation is blocked until numeric and evidence validation passes.",
+            ],
+        }
+
+    def _build_external_research_policy(self, user_question: str) -> Dict[str, Any]:
+        wants_research = bool(re.search(r"web\s*scrap|scrape|research|latest|news|article|source|poll", user_question, re.IGNORECASE))
+        return {
+            "enabled": wants_research,
+            "outside_graph": True,
+            "allowed_inputs": ["user_provided_urls", "uploaded_files", "approved_search_or_scraping_tool_results"],
+            "injection_point": "before each debate pocket and before numeric synthesis",
+            "requirements": [
+                "Research pointers must include source, date, extracted claim, numeric values when present, and confidence/caveat.",
+                "Debating agents must explicitly say whether each new pointer changes their forecast.",
+                "External research does not overwrite graph memory unless explicitly saved as evidence.",
+            ],
+        }

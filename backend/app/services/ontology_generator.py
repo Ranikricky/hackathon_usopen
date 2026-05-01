@@ -212,6 +212,46 @@ def _select_run_agent_types(
     return anchors + pool[:max(0, limit - len(anchors))]
 
 
+DOMAIN_ENTITY_MARKERS = {
+    "election": [
+        "voter", "party", "campaign", "poll", "turnout", "candidate",
+        "constituency", "alliance", "booth", "tmc", "bjp", "congress",
+        "minority", "women", "youth", "regional",
+    ],
+    "oil": ["opec", "oil", "crude", "brent", "wti", "shale", "refiner", "trader", "shipping", "inventory"],
+    "ai_future": ["ai", "lab", "model", "open", "source", "enterprise", "regulator", "worker", "compute"],
+    "geopolitics": ["state", "military", "diplomat", "sanction", "intelligence", "ally", "border", "government"],
+    "market": ["investor", "trader", "issuer", "liquidity", "credit", "strategist", "portfolio", "market"],
+    "business": ["executive", "customer", "competitor", "sales", "product", "channel", "investor", "business"],
+    "healthcare": ["patient", "clinician", "provider", "payer", "pharma", "health", "regulator", "doctor"],
+    "climate": ["utility", "renewable", "fossil", "grid", "emitter", "scientist", "community", "climate"],
+    "real_estate": ["buyer", "owner", "builder", "lender", "broker", "tenant", "planner", "housing"],
+    "crypto": ["protocol", "holder", "exchange", "validator", "defi", "stablecoin", "regulator", "chain"],
+    "supply_chain": ["supplier", "manufacturer", "logistics", "port", "retailer", "procurement", "customs"],
+    "education": ["student", "teacher", "administrator", "parent", "edtech", "employer", "researcher"],
+    "policy": ["policymaker", "agency", "industry", "citizen", "advocate", "court", "budget", "analyst"],
+    "technology": ["platform", "developer", "customer", "user", "security", "cloud", "product", "analyst"],
+    "sports": ["team", "coach", "player", "medical", "analyst", "official", "fan", "data"],
+    "consumer": ["consumer", "retailer", "brand", "influencer", "supplier", "pricing", "store", "researcher"],
+    "social": ["influencer", "community", "media", "platform", "brand", "civil", "trend", "participant"],
+    "macro": ["central", "bank", "economist", "labor", "business", "financial", "media", "government"],
+}
+
+
+def _ontology_matches_domain(result: Dict[str, Any], domain: str) -> bool:
+    """Return False when an LLM response clearly reused the wrong domain's actors."""
+    if domain in {"other", ""}:
+        return True
+
+    names = " ".join(
+        str(entity.get("name", "")) for entity in result.get("entity_types", []) if isinstance(entity, dict)
+    ).lower()
+    markers = DOMAIN_ENTITY_MARKERS.get(domain) or []
+    if not markers:
+        return True
+    return any(marker in names for marker in markers)
+
+
 # Ontology generation system prompt.
 ONTOLOGY_SYSTEM_PROMPT = """You are an expert knowledge-graph ontology designer. Analyze the supplied documents and simulation requirement, then design entity and relationship types for a social/public-opinion simulation.
 
@@ -259,9 +299,9 @@ Return this JSON shape:
 
 ## Design Rules
 
-1. Return exactly 10 entity types.
-2. The final two entity types must be `Person` and `Organization`.
-3. The first eight entity types should be specific actors inferred from the input.
+1. Return 6-10 entity types. These are actor categories, not the final number of simulation agents.
+2. Include `Person` and `Organization` as fallback types when useful.
+3. The specific entity types should be actor categories inferred from the input.
 4. Every entity type must represent a real actor that could communicate or make decisions.
 5. Use 6-10 relationship types and ensure source_targets reference defined entity types.
 6. Each entity type should have 1-3 attributes. Do not use reserved names: `name`, `uuid`, `group_id`, `created_at`, `summary`.
@@ -330,6 +370,18 @@ class OntologyGenerator:
         
         # Validate and post-process.
         result = self._validate_and_process(result)
+
+        inferred_domain = _score_domain(
+            " ".join([simulation_requirement or "", additional_context or "", " ".join(document_texts or [])])
+        )
+        if not _ontology_matches_domain(result, inferred_domain):
+            logger.warning(
+                "Ontology LLM output did not match inferred domain '%s'; using deterministic domain fallback.",
+                inferred_domain,
+            )
+            result = self._validate_and_process(
+                self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed)
+            )
         
         return result
 
@@ -396,9 +448,9 @@ For the same prompt in a later run, it is acceptable and desirable to vary secon
 Design entity types and relationship types for a social/public-opinion simulation.
 
 Required rules:
-1. Return exactly 10 entity types.
-2. The final two must be fallback types: Person and Organization.
-3. The first eight must be specific actor types based on the input.
+1. Return 6-10 entity types. These are actor categories, not the final number of simulation agents.
+2. Include fallback types Person and Organization when useful.
+3. The specific actor types must be based on the input.
 4. Entity types must be real actors, not abstract concepts.
 5. Attribute names cannot use reserved names such as name, uuid, or group_id.
 """
