@@ -26,6 +26,16 @@ DOMAINS = {
     "market",
     "social",
     "business",
+    "healthcare",
+    "climate",
+    "real_estate",
+    "crypto",
+    "supply_chain",
+    "education",
+    "policy",
+    "technology",
+    "sports",
+    "consumer",
     "other",
 }
 
@@ -344,19 +354,37 @@ Uploaded/project context excerpt:
 
     def _classify_domain(self, text: str) -> str:
         lowered = text.lower()
-        keyword_map = [
-            ("election", ["election", "vote", "turnout", "candidate", "campaign", "poll"]),
-            ("oil", ["oil", "brent", "wti", "opec", "crude", "barrel", "inventory"]),
-            ("ai_future", ["ai", "artificial intelligence", "frontier model", "model capability", "open-source", "enterprise adoption"]),
-            ("macro", ["unemployment", "gdp", "inflation", "interest rate", "recession", "macro", "fed", "central bank"]),
-            ("geopolitics", ["geopolitic", "war", "sanction", "diplomacy", "conflict", "country risk"]),
-            ("market", ["stock", "bond", "market", "equity", "yield", "volatility", "commodity"]),
-            ("social", ["social", "media narrative", "consumer trend", "public opinion", "culture"]),
-            ("business", ["business", "strategy", "sales", "customer", "pricing", "competitor"]),
+        keyword_map = {
+            "election": ["election", "vote", "turnout", "candidate", "campaign", "poll", "seat share", "constituency"],
+            "oil": ["oil", "brent", "wti", "opec", "crude", "barrel", "inventory", "refinery", "shale"],
+            "ai_future": ["ai", "artificial intelligence", "frontier model", "model capability", "open-source", "enterprise adoption", "gpu", "llm"],
+            "geopolitics": ["geopolitic", "war", "sanction", "diplomacy", "conflict", "country risk", "military", "border"],
+            "healthcare": ["healthcare", "hospital", "patient", "doctor", "drug", "vaccine", "public health", "insurance", "pharma"],
+            "climate": ["climate", "carbon", "emissions", "renewable", "solar", "wind", "grid", "energy transition", "flood", "drought"],
+            "real_estate": ["real estate", "housing price", "home price", "mortgage", "rent", "tenant", "landlord", "developer"],
+            "crypto": ["crypto", "bitcoin", "ethereum", "stablecoin", "defi", "blockchain", "token", "on-chain"],
+            "supply_chain": ["supply chain", "logistics", "shipping", "port", "freight", "supplier", "lead time", "manufacturing"],
+            "education": ["education", "school", "student", "teacher", "university", "college", "tuition", "enrollment"],
+            "policy": ["policy", "regulation", "regulator", "law", "bill", "legislation", "court", "compliance", "tax", "subsidy"],
+            "technology": ["technology adoption", "software", "saas", "platform", "app", "developer", "cloud", "cybersecurity", "api"],
+            "sports": ["sports", "team", "league", "match", "tournament", "player", "coach", "injury", "playoff"],
+            "consumer": ["consumer", "retail", "shopping", "brand", "fashion", "restaurant", "spending", "loyalty", "store traffic"],
+            "business": ["business", "strategy", "sales", "customer", "pricing", "competitor", "market share"],
+            "social": ["social", "media narrative", "consumer trend", "public opinion", "culture", "influencer", "sentiment"],
+            "market": ["stock", "bond", "market", "equity", "yield", "volatility", "commodity", "portfolio"],
+            "macro": ["unemployment", "gdp", "inflation", "interest rate", "recession", "macro", "fed", "central bank"],
+        }
+        priority = [
+            "election", "oil", "ai_future", "geopolitics", "healthcare", "climate",
+            "real_estate", "crypto", "supply_chain", "education", "policy",
+            "technology", "sports", "consumer", "business", "social", "market", "macro",
         ]
-        for domain, keywords in keyword_map:
-            if any(keyword in lowered for keyword in keywords):
-                return domain
+        scores = {
+            domain: sum(1 for keyword in keywords if keyword in lowered)
+            for domain, keywords in keyword_map.items()
+        }
+        if any(scores.values()):
+            return max(priority, key=lambda domain: (scores.get(domain, 0), -priority.index(domain)))
         return "other"
 
     def _detect_cutoff_date(self, text: str) -> Optional[str]:

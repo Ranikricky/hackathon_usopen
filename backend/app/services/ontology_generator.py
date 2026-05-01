@@ -53,6 +53,55 @@ def _score_domain(text: str) -> str:
             "business strategy", "sales", "customer", "pricing", "competitor", "market share",
             "go-to-market", "retention", "churn", "product launch", "brand",
         ],
+        "healthcare": [
+            "healthcare", "hospital", "patient", "doctor", "clinic", "drug", "vaccine",
+            "public health", "insurance", "medicare", "medical", "pharma", "disease",
+            "epidemic", "pandemic", "clinical", "health system",
+        ],
+        "climate": [
+            "climate", "carbon", "emissions", "renewable", "solar", "wind", "grid",
+            "energy transition", "ev", "electric vehicle", "battery", "net zero",
+            "weather", "drought", "flood", "heatwave", "adaptation",
+        ],
+        "real_estate": [
+            "real estate", "housing price", "home price", "mortgage", "rent", "rental",
+            "office vacancy", "commercial property", "developer", "landlord", "tenant",
+            "construction", "property market", "housing supply",
+        ],
+        "crypto": [
+            "crypto", "bitcoin", "ethereum", "stablecoin", "defi", "blockchain",
+            "token", "exchange", "wallet", "mining", "validator", "on-chain",
+            "liquidity pool", "etf", "halving",
+        ],
+        "supply_chain": [
+            "supply chain", "logistics", "shipping", "port", "freight", "container",
+            "supplier", "semiconductor", "inventory backlog", "lead time", "factory",
+            "manufacturing", "procurement", "warehouse",
+        ],
+        "education": [
+            "education", "school", "student", "teacher", "university", "college",
+            "curriculum", "exam", "tuition", "enrollment", "edtech", "learning",
+            "campus", "admissions",
+        ],
+        "policy": [
+            "policy", "regulation", "regulator", "law", "bill", "legislation",
+            "court", "compliance", "tax", "subsidy", "tariff", "permit",
+            "public policy", "agency rule",
+        ],
+        "technology": [
+            "technology adoption", "software", "saas", "platform", "app", "developer",
+            "cloud", "cybersecurity", "product adoption", "hardware", "device",
+            "telecom", "network", "api", "subscription",
+        ],
+        "sports": [
+            "sports", "team", "league", "match", "tournament", "player", "coach",
+            "injury", "fixture", "season", "playoff", "odds", "win probability",
+        ],
+        "consumer": [
+            "consumer", "retail", "shopping", "brand", "fashion", "restaurant",
+            "spending", "household", "loyalty", "price sensitivity", "demand trend",
+            "category", "store traffic",
+        ],
         "social": [
             "social", "media narrative", "public opinion", "consumer trend", "culture",
             "influencer", "sentiment", "viral", "community", "discourse",
@@ -68,7 +117,11 @@ def _score_domain(text: str) -> str:
         scores[domain] = sum(1 for keyword in keywords if keyword in lowered)
 
     # Prefer concrete event domains when scores tie with broad macro/market language.
-    priority = ["election", "oil", "ai_future", "geopolitics", "business", "social", "market", "macro"]
+    priority = [
+        "election", "oil", "ai_future", "geopolitics", "healthcare", "climate",
+        "real_estate", "crypto", "supply_chain", "education", "policy",
+        "technology", "sports", "consumer", "business", "social", "market", "macro",
+    ]
     return max(priority, key=lambda domain: (scores.get(domain, 0), -priority.index(domain))) if any(scores.values()) else "other"
 
 
@@ -405,6 +458,246 @@ Required rules:
                 ("GOVERNS", "Provides governance or capital discipline.", "InvestorBoard", "ExecutiveTeam"),
             ]
             summary = "Fallback business-strategy ontology for executives, customers, competitors, sales, product, channels, analysts, and investors."
+        elif domain == "healthcare":
+            entity_types = [
+                ("PatientGroup", "Patient population affected by care access and outcomes."),
+                ("Clinician", "Doctor, nurse, or care provider making treatment decisions."),
+                ("HospitalOperator", "Provider organization managing capacity and costs."),
+                ("InsurerPayer", "Payer actor shaping coverage and reimbursement."),
+                ("PharmaCompany", "Drug or vaccine developer affecting treatment supply."),
+                ("PublicHealthAgency", "Authority tracking disease, safety, and response."),
+                ("Regulator", "Actor approving, restricting, or enforcing healthcare rules."),
+                ("HealthDataAnalyst", "Analyst forecasting outcomes, demand, or burden."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("TREATS", "Provides care or clinical intervention.", "Clinician", "PatientGroup"),
+                ("OPERATES_CARE_SITE", "Runs facilities or capacity.", "HospitalOperator", "Clinician"),
+                ("REIMBURSES", "Pays or reimburses care and treatment.", "InsurerPayer", "HospitalOperator"),
+                ("SUPPLIES_THERAPY", "Provides drugs, vaccines, or devices.", "PharmaCompany", "HospitalOperator"),
+                ("MONITORS_OUTBREAK", "Tracks health burden or public risk.", "PublicHealthAgency", "PatientGroup"),
+                ("REGULATES_CARE", "Sets approval, safety, or compliance rules.", "Regulator", "Organization"),
+                ("FORECASTS_DEMAND", "Forecasts patient demand or health outcomes.", "HealthDataAnalyst", "Organization"),
+                ("ADVOCATES_FOR", "Advocates for access, quality, or affordability.", "PatientGroup", "Organization"),
+            ]
+            summary = "Fallback healthcare ontology for patients, clinicians, providers, payers, pharma, public health, regulators, and analysts."
+        elif domain == "climate":
+            entity_types = [
+                ("EnergyUtility", "Utility actor operating grid and generation assets."),
+                ("RenewableDeveloper", "Developer building clean-energy capacity."),
+                ("FossilFuelProducer", "Producer exposed to transition and fuel demand."),
+                ("ClimateRegulator", "Policy actor shaping emissions rules and incentives."),
+                ("GridOperator", "Operator balancing reliability and transmission."),
+                ("IndustrialEmitter", "Company with large emissions and abatement choices."),
+                ("ClimateScientist", "Expert modeling risk, weather, and emissions pathways."),
+                ("CommunityStakeholder", "Local group exposed to climate and transition impacts."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("BUILDS_CAPACITY", "Builds generation, storage, or adaptation capacity.", "RenewableDeveloper", "EnergyUtility"),
+                ("SUPPLIES_ENERGY", "Supplies fuel or power into the system.", "FossilFuelProducer", "EnergyUtility"),
+                ("REGULATES_EMISSIONS", "Sets emissions rules or incentives.", "ClimateRegulator", "IndustrialEmitter"),
+                ("BALANCES_GRID", "Maintains grid reliability and dispatch.", "GridOperator", "EnergyUtility"),
+                ("EMITS_CARBON", "Creates emissions requiring mitigation.", "IndustrialEmitter", "Organization"),
+                ("MODELS_RISK", "Models climate or transition risk.", "ClimateScientist", "ClimateRegulator"),
+                ("IMPACTS_COMMUNITY", "Creates local benefits, costs, or risks.", "Organization", "CommunityStakeholder"),
+                ("ADAPTS_TO_RISK", "Changes behavior in response to climate risk.", "CommunityStakeholder", "Organization"),
+            ]
+            summary = "Fallback climate ontology for utilities, renewables, fossil fuels, regulators, grid operators, emitters, scientists, and communities."
+        elif domain == "real_estate":
+            entity_types = [
+                ("Homebuyer", "Buyer or renter shaping demand and affordability."),
+                ("LandlordOwner", "Property owner setting rents and sale decisions."),
+                ("DeveloperBuilder", "Builder creating new housing or commercial supply."),
+                ("MortgageLender", "Credit provider affecting purchasing power."),
+                ("RealEstateBroker", "Market intermediary observing transaction flow."),
+                ("UrbanPlanner", "Policy actor shaping zoning and permits."),
+                ("TenantGroup", "Renter group affected by rent and supply dynamics."),
+                ("PropertyAnalyst", "Analyst forecasting prices, vacancies, and rents."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("BUYS_OR_RENTS", "Buys or rents property from another actor.", "Homebuyer", "LandlordOwner"),
+                ("BUILDS_SUPPLY", "Adds new real-estate supply.", "DeveloperBuilder", "Organization"),
+                ("FINANCES_PURCHASE", "Provides mortgage or construction credit.", "MortgageLender", "Homebuyer"),
+                ("BROKERS_DEAL", "Connects buyers, sellers, landlords, or tenants.", "RealEstateBroker", "Person"),
+                ("ZONES_OR_PERMITS", "Shapes zoning, approvals, or permits.", "UrbanPlanner", "DeveloperBuilder"),
+                ("SETS_RENT", "Sets rent or lease terms.", "LandlordOwner", "TenantGroup"),
+                ("FORECASTS_MARKET", "Forecasts price, rent, vacancy, or absorption.", "PropertyAnalyst", "Organization"),
+                ("RESPONDS_TO_AFFORDABILITY", "Changes behavior due to affordability pressure.", "TenantGroup", "UrbanPlanner"),
+            ]
+            summary = "Fallback real-estate ontology for buyers, owners, builders, lenders, brokers, planners, tenants, and analysts."
+        elif domain == "crypto":
+            entity_types = [
+                ("ProtocolDeveloper", "Developer maintaining protocol or smart contracts."),
+                ("TokenHolder", "Investor or user holding crypto assets."),
+                ("ExchangeOperator", "Venue providing trading and custody access."),
+                ("ValidatorMiner", "Actor securing network consensus."),
+                ("DefiProtocol", "On-chain protocol offering financial functions."),
+                ("StablecoinIssuer", "Issuer managing stablecoin reserves and redemption."),
+                ("CryptoRegulator", "Policy actor supervising crypto markets."),
+                ("OnchainAnalyst", "Analyst interpreting blockchain flows and risk."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("MAINTAINS_PROTOCOL", "Maintains or upgrades blockchain software.", "ProtocolDeveloper", "DefiProtocol"),
+                ("TRADES_TOKEN", "Buys, sells, or transfers tokens.", "TokenHolder", "ExchangeOperator"),
+                ("LISTS_ASSET", "Lists or delists crypto assets.", "ExchangeOperator", "Organization"),
+                ("SECURES_NETWORK", "Validates or mines network activity.", "ValidatorMiner", "DefiProtocol"),
+                ("PROVIDES_LIQUIDITY", "Provides on-chain or exchange liquidity.", "TokenHolder", "DefiProtocol"),
+                ("ISSUES_STABLECOIN", "Issues and redeems stable-value tokens.", "StablecoinIssuer", "TokenHolder"),
+                ("REGULATES_CRYPTO", "Sets or enforces crypto-market rules.", "CryptoRegulator", "Organization"),
+                ("ANALYZES_FLOW", "Analyzes on-chain transactions and risk.", "OnchainAnalyst", "Organization"),
+            ]
+            summary = "Fallback crypto ontology for protocols, holders, exchanges, validators, DeFi, stablecoins, regulators, and on-chain analysts."
+        elif domain == "supply_chain":
+            entity_types = [
+                ("Supplier", "Upstream provider of materials or components."),
+                ("Manufacturer", "Producer transforming inputs into goods."),
+                ("LogisticsCarrier", "Carrier moving goods through transport networks."),
+                ("PortOperator", "Port or terminal actor affecting throughput."),
+                ("RetailerDistributor", "Downstream actor managing inventory and demand."),
+                ("ProcurementManager", "Buyer managing sourcing and supplier risk."),
+                ("CustomsRegulator", "Authority affecting trade clearance and tariffs."),
+                ("SupplyChainAnalyst", "Analyst forecasting bottlenecks and lead times."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("SUPPLIES_INPUT", "Supplies materials, parts, or services.", "Supplier", "Manufacturer"),
+                ("MANUFACTURES_FOR", "Produces goods for another actor.", "Manufacturer", "RetailerDistributor"),
+                ("TRANSPORTS_GOODS", "Moves goods through logistics networks.", "LogisticsCarrier", "Organization"),
+                ("HANDLES_CARGO", "Processes cargo through ports or terminals.", "PortOperator", "LogisticsCarrier"),
+                ("ORDERS_INVENTORY", "Places orders or manages stock.", "RetailerDistributor", "Supplier"),
+                ("SOURCES_FROM", "Selects and manages sourcing relationships.", "ProcurementManager", "Supplier"),
+                ("CLEARS_TRADE", "Applies customs, tariff, or border rules.", "CustomsRegulator", "Organization"),
+                ("FORECASTS_BOTTLENECK", "Forecasts delays, shortages, or lead times.", "SupplyChainAnalyst", "Organization"),
+            ]
+            summary = "Fallback supply-chain ontology for suppliers, manufacturers, logistics, ports, retailers, procurement, customs, and analysts."
+        elif domain == "education":
+            entity_types = [
+                ("StudentGroup", "Learner population affected by outcomes and access."),
+                ("TeacherFaculty", "Educator delivering instruction and assessment."),
+                ("SchoolAdministrator", "Institution leader allocating resources."),
+                ("ParentCommunity", "Family or community actor shaping demand and trust."),
+                ("EducationRegulator", "Policy actor setting standards and funding rules."),
+                ("EdtechProvider", "Technology provider affecting learning delivery."),
+                ("Employer", "Labor-market actor demanding skills and credentials."),
+                ("EducationResearcher", "Analyst evaluating outcomes and policy effects."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("TEACHES", "Provides instruction or academic support.", "TeacherFaculty", "StudentGroup"),
+                ("ADMINISTERS_PROGRAM", "Runs school, college, or program operations.", "SchoolAdministrator", "TeacherFaculty"),
+                ("ADVOCATES_FOR_STUDENTS", "Advocates around quality, access, or safety.", "ParentCommunity", "SchoolAdministrator"),
+                ("REGULATES_EDUCATION", "Sets standards, funding, or accountability.", "EducationRegulator", "Organization"),
+                ("PROVIDES_PLATFORM", "Provides learning technology or curriculum tools.", "EdtechProvider", "SchoolAdministrator"),
+                ("HIRES_GRADUATES", "Demands skills or credentials from learners.", "Employer", "StudentGroup"),
+                ("MEASURES_OUTCOME", "Analyzes learning, enrollment, or completion outcomes.", "EducationResearcher", "Organization"),
+                ("RESPONDS_TO_POLICY", "Changes behavior after policy or funding shifts.", "StudentGroup", "EducationRegulator"),
+            ]
+            summary = "Fallback education ontology for students, teachers, administrators, parents, regulators, edtech, employers, and researchers."
+        elif domain == "policy":
+            entity_types = [
+                ("PolicyMaker", "Official designing laws, rules, or programs."),
+                ("RegulatoryAgency", "Agency implementing and enforcing rules."),
+                ("AffectedIndustry", "Industry group impacted by policy choices."),
+                ("CitizenGroup", "Public group affected by policy outcomes."),
+                ("LobbyistAdvocate", "Actor influencing policy on behalf of interests."),
+                ("CourtLegalActor", "Legal actor interpreting or challenging policy."),
+                ("BudgetOffice", "Fiscal actor estimating cost and feasibility."),
+                ("PolicyAnalyst", "Expert evaluating policy impact and tradeoffs."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("DRAFTS_POLICY", "Designs or proposes policy changes.", "PolicyMaker", "RegulatoryAgency"),
+                ("ENFORCES_RULE", "Implements or enforces rules.", "RegulatoryAgency", "AffectedIndustry"),
+                ("AFFECTS_PUBLIC", "Changes outcomes for citizens or households.", "PolicyMaker", "CitizenGroup"),
+                ("LOBBIES", "Attempts to influence policy choices.", "LobbyistAdvocate", "PolicyMaker"),
+                ("CHALLENGES_POLICY", "Challenges or interprets policy legally.", "CourtLegalActor", "RegulatoryAgency"),
+                ("ESTIMATES_COST", "Estimates fiscal cost or budget impact.", "BudgetOffice", "PolicyMaker"),
+                ("EVALUATES_IMPACT", "Analyzes policy effectiveness and risk.", "PolicyAnalyst", "Organization"),
+                ("COMPLIES_WITH", "Adapts behavior to comply with policy.", "AffectedIndustry", "RegulatoryAgency"),
+            ]
+            summary = "Fallback policy ontology for policymakers, agencies, industries, citizens, advocates, courts, budgets, and analysts."
+        elif domain == "technology":
+            entity_types = [
+                ("PlatformCompany", "Technology platform shaping product and ecosystem."),
+                ("DeveloperCommunity", "Builders extending tools, apps, or integrations."),
+                ("EnterpriseCustomer", "Business buyer adopting technology products."),
+                ("EndUser", "Individual user shaping usage and retention."),
+                ("SecurityTeam", "Actor managing cybersecurity and trust."),
+                ("CloudProvider", "Infrastructure provider powering technology deployment."),
+                ("ProductManager", "Actor defining roadmap and adoption strategy."),
+                ("TechAnalyst", "Expert forecasting adoption, competition, and risk."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("BUILDS_PLATFORM", "Builds or operates a technology platform.", "PlatformCompany", "DeveloperCommunity"),
+                ("DEVELOPS_INTEGRATION", "Builds apps, tools, or integrations.", "DeveloperCommunity", "PlatformCompany"),
+                ("ADOPTS_TECH", "Adopts product or platform in operations.", "EnterpriseCustomer", "PlatformCompany"),
+                ("USES_PRODUCT", "Uses and evaluates product experience.", "EndUser", "PlatformCompany"),
+                ("SECURES_SYSTEM", "Protects infrastructure, data, or users.", "SecurityTeam", "Organization"),
+                ("HOSTS_SERVICE", "Provides cloud or infrastructure capacity.", "CloudProvider", "PlatformCompany"),
+                ("SETS_ROADMAP", "Defines product roadmap and positioning.", "ProductManager", "DeveloperCommunity"),
+                ("FORECASTS_ADOPTION", "Forecasts adoption, churn, or competitive risk.", "TechAnalyst", "Organization"),
+            ]
+            summary = "Fallback technology ontology for platforms, developers, customers, users, security, cloud, product, and analysts."
+        elif domain == "sports":
+            entity_types = [
+                ("TeamManagement", "Management shaping roster and strategy."),
+                ("Coach", "Coach setting tactics, preparation, and selection."),
+                ("Player", "Athlete whose performance affects outcomes."),
+                ("MedicalStaff", "Staff managing injuries and availability."),
+                ("OpponentAnalyst", "Analyst assessing rival strengths and tactics."),
+                ("LeagueOfficial", "Authority setting schedule, rules, and discipline."),
+                ("FanBase", "Supporter group affecting atmosphere and demand."),
+                ("SportsDataAnalyst", "Analyst forecasting performance and win probability."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("SELECTS_PLAYER", "Selects or manages player availability.", "Coach", "Player"),
+                ("SETS_TACTICS", "Sets game plan and tactical approach.", "Coach", "TeamManagement"),
+                ("MANAGES_ROSTER", "Controls roster, transfers, or contracts.", "TeamManagement", "Player"),
+                ("TREATS_INJURY", "Assesses or treats injury risk.", "MedicalStaff", "Player"),
+                ("SCOUTS_OPPONENT", "Analyzes opponent performance and tactics.", "OpponentAnalyst", "Coach"),
+                ("REGULATES_MATCH", "Sets rules, schedule, or discipline.", "LeagueOfficial", "Organization"),
+                ("SUPPORTS_TEAM", "Creates demand, atmosphere, or pressure.", "FanBase", "TeamManagement"),
+                ("FORECASTS_RESULT", "Forecasts score, ranking, or win probability.", "SportsDataAnalyst", "Organization"),
+            ]
+            summary = "Fallback sports ontology for team management, coaches, players, medical staff, analysts, officials, fans, and data analysts."
+        elif domain == "consumer":
+            entity_types = [
+                ("ConsumerSegment", "Buyer group shaping demand and preferences."),
+                ("Retailer", "Seller managing assortment, price, and availability."),
+                ("BrandManager", "Actor shaping positioning and marketing."),
+                ("InfluencerCreator", "Attention actor affecting tastes and demand."),
+                ("SupplierManufacturer", "Producer supplying products and capacity."),
+                ("PricingAnalyst", "Analyst evaluating elasticity and promotions."),
+                ("StoreOperator", "Operator managing traffic, service, and inventory."),
+                ("ConsumerResearcher", "Researcher tracking behavior, sentiment, and loyalty."),
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            edge_types = [
+                ("BUYS_FROM", "Purchases from retailer or brand.", "ConsumerSegment", "Retailer"),
+                ("STOCKS_PRODUCT", "Carries product or manages assortment.", "Retailer", "SupplierManufacturer"),
+                ("POSITIONS_BRAND", "Shapes brand message and target segment.", "BrandManager", "ConsumerSegment"),
+                ("INFLUENCES_DEMAND", "Influences demand or taste formation.", "InfluencerCreator", "ConsumerSegment"),
+                ("SUPPLIES_PRODUCT", "Supplies finished goods or components.", "SupplierManufacturer", "Retailer"),
+                ("SETS_PRICE", "Analyzes or sets price and promotions.", "PricingAnalyst", "BrandManager"),
+                ("OPERATES_STORE", "Runs store, channel, or service experience.", "StoreOperator", "Retailer"),
+                ("FORECASTS_TREND", "Forecasts demand, loyalty, or category trends.", "ConsumerResearcher", "Organization"),
+            ]
+            summary = "Fallback consumer ontology for segments, retailers, brands, influencers, suppliers, pricing, store operators, and researchers."
         elif domain == "social":
             entity_types = [
                 ("Influencer", "High-reach actor shaping attention and sentiment."),
