@@ -5,7 +5,16 @@ import service, { requestWithRetry } from './index'
  * @param {Object} data - { simulation_id, force_regenerate? }
  */
 export const generateReport = (data) => {
-  return requestWithRetry(() => service.post('/api/report/generate', data), 3, 1000)
+  return requestWithRetry(
+    () => service.post('/api/report/generate', data).catch(error => {
+      if (error?.response?.status === 409 && error.response.data) {
+        return error.response.data
+      }
+      throw error
+    }),
+    3,
+    1000
+  )
 }
 
 /**

@@ -80,8 +80,8 @@
         <!-- 卡片标题（使用模拟需求的前20字作为标题） -->
         <h3 class="card-title">{{ getSimulationTitle(project.simulation_requirement) }}</h3>
 
-        <!-- 卡片描述（模拟需求完整展示） -->
-        <p class="card-desc">{{ truncateText(project.simulation_requirement, 55) }}</p>
+        <!-- Card description. -->
+        <p class="card-desc">{{ truncateText(sanitizeLegacyBranding(project.simulation_requirement), 55) }}</p>
 
         <!-- 卡片底部 -->
         <div class="card-footer">
@@ -127,7 +127,7 @@
               <!-- 模拟需求 -->
               <div class="modal-section">
                 <div class="modal-label">{{ $t('history.simRequirement') }}</div>
-                <div class="modal-requirement">{{ selectedProject.simulation_requirement || $t('common.none') }}</div>
+                <div class="modal-requirement">{{ sanitizeLegacyBranding(selectedProject.simulation_requirement) || $t('common.none') }}</div>
               </div>
 
               <!-- 文件列表 -->
@@ -200,56 +200,51 @@ const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
 
-// 状态
+// State.
 const projects = ref([])
 const loading = ref(true)
 const isExpanded = ref(false)
 const hoveringCard = ref(null)
 const historyContainer = ref(null)
-const selectedProject = ref(null)  // 当前选中的项目（用于弹窗）
+const selectedProject = ref(null)
 let observer = null
-let isAnimating = false  // 动画锁，防止闪烁
-let expandDebounceTimer = null  // 防抖定时器
-let pendingState = null  // 记录待执行的目标状态
+let isAnimating = false
+let expandDebounceTimer = null
+let pendingState = null
 
-// 卡片布局配置 - 调整为更宽的比例
+// Card layout.
 const CARDS_PER_ROW = 4
 const CARD_WIDTH = 280  
 const CARD_HEIGHT = 280 
 const CARD_GAP = 24
 
-// 动态计算容器高度样式
+// Calculate container height dynamically.
 const containerStyle = computed(() => {
   if (!isExpanded.value) {
-    // 折叠态：固定高度
     return { minHeight: '420px' }
   }
   
-  // 展开态：根据卡片数量动态计算高度
   const total = projects.value.length
   if (total === 0) {
     return { minHeight: '280px' }
   }
   
   const rows = Math.ceil(total / CARDS_PER_ROW)
-  // 计算实际需要的高度：行数 * 卡片高度 + (行数-1) * 间距 + 少量底部间距
   const expandedHeight = rows * CARD_HEIGHT + (rows - 1) * CARD_GAP + 10
   
   return { minHeight: `${expandedHeight}px` }
 })
 
-// 获取卡片样式
+// Get card style.
 const getCardStyle = (index) => {
   const total = projects.value.length
   
   if (isExpanded.value) {
-    // 展开态：网格布局
     const transition = 'transform 700ms cubic-bezier(0.23, 1, 0.32, 1), opacity 700ms cubic-bezier(0.23, 1, 0.32, 1), box-shadow 0.3s ease, border-color 0.3s ease'
 
     const col = index % CARDS_PER_ROW
     const row = Math.floor(index / CARDS_PER_ROW)
     
-    // 计算当前行的卡片数量，确保每行居中
     const currentRowStart = row * CARDS_PER_ROW
     const currentRowCards = Math.min(CARDS_PER_ROW, total - currentRowStart)
     
@@ -259,7 +254,6 @@ const getCardStyle = (index) => {
     const colInRow = index % CARDS_PER_ROW
     const x = startX + colInRow * (CARD_WIDTH + CARD_GAP)
     
-    // 向下展开，增加与标题的间距
     const y = 20 + row * (CARD_HEIGHT + CARD_GAP)
 
     return {
@@ -269,14 +263,12 @@ const getCardStyle = (index) => {
       transition: transition
     }
   } else {
-    // 折叠态：扇形堆叠
     const transition = 'transform 700ms cubic-bezier(0.23, 1, 0.32, 1), opacity 700ms cubic-bezier(0.23, 1, 0.32, 1), box-shadow 0.3s ease, border-color 0.3s ease'
 
     const centerIndex = (total - 1) / 2
     const offset = index - centerIndex
     
     const x = offset * 35
-    // 调整起始位置，靠近标题但保持适当间距
     const y = 25 + Math.abs(offset) * 8
     const r = offset * 3
     const s = 0.95 - Math.abs(offset) * 0.05
@@ -290,24 +282,21 @@ const getCardStyle = (index) => {
   }
 }
 
-// 根据轮数进度获取样式类
+// Get progress style from simulation rounds.
 const getProgressClass = (simulation) => {
   const current = simulation.current_round || 0
   const total = simulation.total_rounds || 0
   
   if (total === 0 || current === 0) {
-    // 未开始
     return 'not-started'
   } else if (current >= total) {
-    // 已完成
     return 'completed'
   } else {
-    // 进行中
     return 'in-progress'
   }
 }
 
-// 格式化日期（只显示日期部分）
+// Format date.
 const formatDate = (dateStr) => {
   if (!dateStr) return ''
   try {
@@ -318,7 +307,7 @@ const formatDate = (dateStr) => {
   }
 }
 
-// 格式化时间（显示时:分）
+// Format time.
 const formatTime = (dateStr) => {
   if (!dateStr) return ''
   try {
@@ -331,27 +320,37 @@ const formatTime = (dateStr) => {
   }
 }
 
-// 截断文本
+// Replace legacy project text that was stored before the Horizon XL rebrand.
+const sanitizeLegacyBranding = (text) => {
+  if (!text) return ''
+  return String(text)
+    .replace(/MiroFish/g, 'Horizon XL')
+    .replace(/MIROFISH/g, 'HORIZON XL')
+    .replace(/mirofish/g, 'horizon xl')
+}
+
+// Truncate text.
 const truncateText = (text, maxLength) => {
   if (!text) return ''
   return text.length > maxLength ? text.slice(0, maxLength) + '...' : text
 }
 
-// 从模拟需求生成标题（取前20字）
+// Generate a compact title from the simulation requirement.
 const getSimulationTitle = (requirement) => {
   if (!requirement) return t('history.untitledSimulation')
-  const title = requirement.slice(0, 20)
-  return requirement.length > 20 ? title + '...' : title
+  const sanitized = sanitizeLegacyBranding(requirement)
+  const title = sanitized.slice(0, 20)
+  return sanitized.length > 20 ? title + '...' : title
 }
 
-// 格式化 simulation_id 显示（截取前6位）
+// Format simulation id.
 const formatSimulationId = (simulationId) => {
   if (!simulationId) return 'SIM_UNKNOWN'
   const prefix = simulationId.replace('sim_', '').slice(0, 6)
   return `SIM_${prefix.toUpperCase()}`
 }
 
-// 格式化轮数显示（当前轮/总轮数）
+// Format round count.
 const formatRounds = (simulation) => {
   const current = simulation.current_round || 0
   const total = simulation.total_rounds || 0

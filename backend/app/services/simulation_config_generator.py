@@ -12,6 +12,7 @@
 
 import json
 import math
+import re
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -316,6 +317,12 @@ class SimulationConfigGenerator:
         event_config_result = self._generate_event_config(context, simulation_requirement, entities)
         event_config = self._parse_event_config(event_config_result)
         event_config = self._inject_research_concern_posts(
+            event_config,
+            simulation_requirement,
+            document_text,
+            entities,
+        )
+        event_config = self._ensure_contextual_seed_posts(
             event_config,
             simulation_requirement,
             document_text,
@@ -852,6 +859,141 @@ JSON shape:
         else:
             event_config.narrative_direction = "Evidence gaps must be surfaced before participant agents revise forecasts."
         return event_config
+
+    def _ensure_contextual_seed_posts(
+        self,
+        event_config: EventConfig,
+        simulation_requirement: str,
+        document_text: str,
+        entities: List[EntityNode],
+    ) -> EventConfig:
+        """Prevent the simulator from falling back to unrelated built-in seed events."""
+        existing_posts = [
+            post for post in event_config.initial_posts
+            if str(post.get("content", "")).strip()
+        ]
+        if existing_posts:
+            event_config.initial_posts = existing_posts
+            return event_config
+
+        combined_text = f"{simulation_requirement or ''}\n{document_text or ''}"
+        available_types = [e.get_entity_type() or "Unknown" for e in entities]
+        poster_type = self._choose_seed_poster_type(available_types, combined_text)
+        hot_topics = self._extract_hot_topics(combined_text)
+        prompt_summary = self._summarize_requirement(combined_text)
+        domain_hint = self._infer_seed_domain(combined_text)
+
+        event_config.initial_posts = [
+            {
+                "content": (
+                    f"Simulation kickoff for {domain_hint}: {prompt_summary} "
+                    "All participant agents must keep the discussion inside this prompt, identify the key evidence they trust, "
+                    "state what they are uncertain about, and produce numeric forecasts only for the requested target variables."
+                ),
+                "poster_type": poster_type,
+            },
+            {
+                "content": (
+                    "Debate control checkpoint: before reacting, name the specific prompt facts you are using, "
+                    "avoid unrelated topics, and challenge any agent that drifts away from the simulation question."
+                ),
+                "poster_type": poster_type,
+            },
+        ]
+
+        if hot_topics:
+            event_config.hot_topics = list(dict.fromkeys([*event_config.hot_topics, *hot_topics]))
+
+        if not event_config.narrative_direction:
+            event_config.narrative_direction = (
+                f"Keep the discussion grounded in {domain_hint}. Use the user prompt as the canonical seed event, "
+                "then let agents revise beliefs through the configured time pockets."
+            )
+
+        return event_config
+
+    def _choose_seed_poster_type(self, available_types: List[str], text: str) -> str:
+        """Pick a domain-appropriate seed poster from generated entity types."""
+        lowered = text.lower()
+        preferred_by_domain = []
+
+        if any(term in lowered for term in ["election", "vote share", "seat share", "turnout", "tmc", "bjp", "west bengal"]):
+            preferred_by_domain = [
+                "PollsterDataScientist",
+                "PollsterDataAnalyst",
+                "PoliticalJournalist",
+                "RegionalGroundObserver",
+                "MediaOutlet",
+                "Journalist",
+            ]
+        elif any(term in lowered for term in ["oil", "brent", "wti", "opec", "crude"]):
+            preferred_by_domain = ["InventoryReporter", "DemandAnalyst", "CommodityTrader", "MediaOutlet", "Journalist"]
+        elif any(term in lowered for term in ["ai", "artificial intelligence", "frontier model", "enterprise adoption"]):
+            preferred_by_domain = ["Regulator", "EnterpriseBuyer", "FrontierLab", "MediaOutlet", "Journalist"]
+        else:
+            preferred_by_domain = [
+                "ExternalResearchScout",
+                "DataRetrievalAnalyst",
+                "EvidenceAuditor",
+                "QuantitativeSynthesizer",
+                "MediaOutlet",
+                "Journalist",
+                "Expert",
+            ]
+
+        return next(
+            (candidate for candidate in preferred_by_domain if candidate in available_types),
+            available_types[0] if available_types else "Unknown",
+        )
+
+    def _infer_seed_domain(self, text: str) -> str:
+        """Return a human-readable domain label for seed posts."""
+        lowered = text.lower()
+        if any(term in lowered for term in ["west bengal", "tmc", "aitc", "bjp", "vote share", "seat share", "turnout"]):
+            return "the West Bengal election forecast"
+        if "election" in lowered or "polling" in lowered:
+            return "the election forecast"
+        if any(term in lowered for term in ["oil", "brent", "wti", "opec", "crude"]):
+            return "the oil-market forecast"
+        if any(term in lowered for term in ["ai", "artificial intelligence", "frontier model"]):
+            return "the AI future simulation"
+        if any(term in lowered for term in ["tariff", "trade agreement", "supply chain"]):
+            return "the trade or supply-chain simulation"
+        if any(term in lowered for term in ["unemployment", "gdp", "inflation", "central bank"]):
+            return "the macroeconomic forecast"
+        return "the requested future simulation"
+
+    def _summarize_requirement(self, text: str, max_chars: int = 700) -> str:
+        """Compact the user requirement into a safe discussion seed."""
+        cleaned = re.sub(r"\s+", " ", text or "").strip()
+        if not cleaned:
+            return "Use the user's simulation request as the only seed context."
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[:max_chars].rsplit(" ", 1)[0] + "..."
+
+    def _extract_hot_topics(self, text: str, limit: int = 10) -> List[str]:
+        """Extract simple prompt-grounded hot topics for recommendation context."""
+        lowered = (text or "").lower()
+        topic_candidates = [
+            ("West Bengal election", ["west bengal", "tmc", "aitc", "bjp"]),
+            ("vote share", ["vote share"]),
+            ("seat share", ["seat share", "seat projection"]),
+            ("turnout", ["turnout"]),
+            ("women voters", ["women", "lakshmir"]),
+            ("minority consolidation", ["minority", "muslim", "sir"]),
+            ("anti-incumbency", ["anti-incumbency", "scam", "corruption"]),
+            ("regional swing", ["region", "north bengal", "jungle mahal", "kolkata"]),
+            ("exit polls", ["exit poll"]),
+            ("no future leakage", ["cut-off", "cutoff", "do not use future", "future leakage"]),
+            ("oil prices", ["brent", "wti", "opec", "crude"]),
+            ("AI adoption", ["ai adoption", "frontier model", "enterprise adoption"]),
+        ]
+        topics = [
+            label for label, terms in topic_candidates
+            if any(term in lowered for term in terms)
+        ]
+        return topics[:limit]
     
     def _assign_initial_post_agents(
         self,

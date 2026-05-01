@@ -1033,6 +1033,8 @@ html[lang="en"] .workflow-list {
   font-weight: 700;
   letter-spacing: 0.18em;
   min-width: max-content;
+  max-width: none;
+  padding-right: 10px;
   overflow: visible;
   white-space: nowrap;
 }
@@ -1179,7 +1181,7 @@ html[lang="en"] .workflow-list {
   box-shadow: var(--hx-shadow);
   padding: 44px;
   position: relative;
-  overflow: hidden;
+  overflow: clip;
   backdrop-filter: blur(18px);
 }
 
@@ -1215,9 +1217,20 @@ html[lang="en"] .workflow-list {
   color: var(--hx-ink);
   font-family: var(--hx-font-display);
   font-size: clamp(3.2rem, 6vw, 6rem);
-  letter-spacing: -0.1em;
+  letter-spacing: 0;
+  padding-right: 0.5em;
   position: relative;
   z-index: 1;
+  max-width: 100%;
+  overflow: visible;
+}
+
+.nav-brand .brand-mark,
+.hero-logo-main .brand-mark {
+  flex: 0 0 auto;
+  min-width: max-content;
+  max-width: none;
+  overflow: visible;
 }
 
 .scroll-down-btn {

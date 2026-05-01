@@ -668,11 +668,18 @@ const handleNextStep = async () => {
       // 跳转到报告页面
       router.push({ name: 'Report', params: { reportId } })
     } else {
-      addLog(t('log.reportGenFailed', { error: res.error || t('common.unknownError') }))
+      const diagnostic = res.diagnostic || res.readiness?.issues?.join('; ') || ''
+      const nextSteps = Array.isArray(res.next_steps) ? res.next_steps.slice(0, 4).join(' | ') : ''
+      const detail = [res.error || t('common.unknownError'), diagnostic, nextSteps].filter(Boolean).join(' :: ')
+      addLog(t('log.reportGenFailed', { error: detail }))
       isGeneratingReport.value = false
     }
   } catch (err) {
-    addLog(t('log.reportGenException', { error: err.message }))
+    const payload = err?.response?.data
+    const diagnostic = payload?.diagnostic || payload?.readiness?.issues?.join('; ') || ''
+    const nextSteps = Array.isArray(payload?.next_steps) ? payload.next_steps.slice(0, 4).join(' | ') : ''
+    const detail = [payload?.error || err.message, diagnostic, nextSteps].filter(Boolean).join(' :: ')
+    addLog(t('log.reportGenException', { error: detail }))
     isGeneratingReport.value = false
   }
 }

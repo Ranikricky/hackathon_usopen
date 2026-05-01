@@ -33,6 +33,15 @@ def _keyword_present(text: str, keyword: str) -> bool:
 def _score_domain(text: str) -> str:
     """Infer the most likely simulation domain from prompt/context text."""
     lowered = text.lower()
+
+    election_signal_terms = [
+        "west bengal", "assembly election", "legislative assembly", "lok sabha",
+        "vote share", "seat share", "turnout", "polling completed", "exit poll",
+        "constituency", "booth", "tmc", "aitc", "bjp", "mamata",
+    ]
+    if sum(1 for term in election_signal_terms if term in lowered) >= 2:
+        return "election"
+
     domain_keywords = {
         "election": [
             "election", "assembly", "lok sabha", "vote share", "seat share", "turnout",
@@ -250,6 +259,93 @@ DOMAIN_ENTITY_MARKERS = {
 }
 
 
+ORCHESTRATION_ENTITY_TYPES = [
+    {
+        "name": "SimulationModerator",
+        "description": "Neutral host keeping the simulation debate on-topic.",
+        "attributes": [
+            {"name": "role", "type": "text", "description": "Actor role in the simulation"},
+            {"name": "position", "type": "text", "description": "Public stance or institutional position"},
+        ],
+        "examples": ["debate moderator", "scenario facilitator"],
+    },
+    {
+        "name": "EvidenceAuditor",
+        "description": "Checks claims against evidence and flags weak sources.",
+        "attributes": [
+            {"name": "role", "type": "text", "description": "Actor role in the simulation"},
+            {"name": "position", "type": "text", "description": "Public stance or institutional position"},
+        ],
+        "examples": ["source auditor", "fact checker"],
+    },
+    {
+        "name": "QuantitativeSynthesizer",
+        "description": "Turns agent claims into numeric forecast paths.",
+        "attributes": [
+            {"name": "role", "type": "text", "description": "Actor role in the simulation"},
+            {"name": "position", "type": "text", "description": "Public stance or institutional position"},
+        ],
+        "examples": ["forecast modeler", "scenario quant"],
+    },
+]
+
+
+ORCHESTRATION_EDGE_TYPES = [
+    ("MODERATES_DISCUSSION", "Keeps discussion focused on the prompt.", "SimulationModerator", "EvidenceAuditor"),
+    ("AUDITS_EVIDENCE", "Checks whether claims are evidence-backed.", "EvidenceAuditor", "QuantitativeSynthesizer"),
+    ("SYNTHESIZES_FORECASTS", "Converts debate into numeric scenarios.", "QuantitativeSynthesizer", "SimulationModerator"),
+]
+
+
+def _ensure_orchestration_entities(entity_types: List[Dict[str, Any]], max_count: int) -> List[Dict[str, Any]]:
+    """Reserve graph slots for moderator, evidence, and quant control agents."""
+    control_names = {entity["name"] for entity in ORCHESTRATION_ENTITY_TYPES}
+    generic_names = {"Person", "Organization"}
+    seen = set()
+    domain_entities = []
+
+    for entity in entity_types:
+        name = entity.get("name", "")
+        if not name or name in seen or name in control_names or name in generic_names:
+            continue
+        seen.add(name)
+        domain_entities.append(entity)
+
+    control_slots = min(len(ORCHESTRATION_ENTITY_TYPES), max_count)
+    domain_budget = max(0, max_count - control_slots)
+    selected = domain_entities[:domain_budget]
+    selected.extend(ORCHESTRATION_ENTITY_TYPES[:control_slots])
+    return selected[:max_count]
+
+
+def _ensure_orchestration_edges(edge_types: List[Dict[str, Any]], max_count: int) -> List[Dict[str, Any]]:
+    """Reserve relationship slots for simulation control agents."""
+    control_names = {name for name, _, _, _ in ORCHESTRATION_EDGE_TYPES}
+    seen = set()
+    domain_edges = []
+    for edge in edge_types:
+        name = edge.get("name", "")
+        if not name or name in seen or name in control_names:
+            continue
+        seen.add(name)
+        domain_edges.append(edge)
+
+    control_edges = [
+        {
+            "name": name,
+            "description": description,
+            "source_targets": [{"source": source, "target": target}],
+            "attributes": [],
+        }
+        for name, description, source, target in ORCHESTRATION_EDGE_TYPES
+    ]
+    control_slots = min(len(control_edges), max_count)
+    domain_budget = max(0, max_count - control_slots)
+    selected = domain_edges[:domain_budget]
+    selected.extend(control_edges[:control_slots])
+    return selected[:max_count]
+
+
 def _ontology_matches_domain(result: Dict[str, Any], domain: str) -> bool:
     """Return False when an LLM response clearly reused the wrong domain's actors."""
     if domain in {"other", ""}:
@@ -461,10 +557,12 @@ Design entity types and relationship types for a domain-general future simulatio
 
 Required rules:
 1. Return 6-10 entity types. These are actor categories, not the final number of simulation agents.
-2. Include fallback types Person and Organization when useful.
-3. The specific actor types must be based on the input.
-4. Entity types must be real actors, not abstract concepts.
-5. Attribute names cannot use reserved names such as name, uuid, or group_id.
+2. Reserve three entity types for simulation control in every domain: SimulationModerator, EvidenceAuditor, and QuantitativeSynthesizer.
+3. Use the remaining entity type slots for prompt-specific causal actors. Do not reuse actors from previous runs.
+4. Include fallback types Person and Organization only when there is room and they add value.
+5. The specific actor types must be based on the input.
+6. Entity types must be real actors, not abstract concepts.
+7. Attribute names cannot use reserved names such as name, uuid, or group_id.
 """
         
         return message
@@ -1133,6 +1231,9 @@ Required rules:
         MAX_ENTITY_TYPES = 10
         MAX_EDGE_TYPES = 10
 
+        result["entity_types"] = _ensure_orchestration_entities(result["entity_types"], MAX_ENTITY_TYPES)
+        result["edge_types"] = _ensure_orchestration_edges(result["edge_types"], MAX_EDGE_TYPES)
+
         # De-duplicate by name, keeping the first occurrence.
         seen_names = set()
         deduped = []
@@ -1145,7 +1246,7 @@ Required rules:
                 logger.warning(f"Duplicate entity type '{name}' removed during validation")
         result["entity_types"] = deduped
 
-        # Fallback entity type definitions.
+        # Generic fallback entity type definitions, added only if slots remain.
         person_fallback = {
             "name": "Person",
             "description": "Any individual person not fitting other specific person types.",
@@ -1182,13 +1283,8 @@ Required rules:
             current_count = len(result["entity_types"])
             needed_slots = len(fallbacks_to_add)
             
-            # If adding fallbacks exceeds the limit, remove lower-priority types.
-            if current_count + needed_slots > MAX_ENTITY_TYPES:
-                to_remove = current_count + needed_slots - MAX_ENTITY_TYPES
-                result["entity_types"] = result["entity_types"][:-to_remove]
-            
-            # Add fallback types.
-            result["entity_types"].extend(fallbacks_to_add)
+            if current_count + needed_slots <= MAX_ENTITY_TYPES:
+                result["entity_types"].extend(fallbacks_to_add)
         
         # Defensive final limit checks.
         if len(result["entity_types"]) > MAX_ENTITY_TYPES:

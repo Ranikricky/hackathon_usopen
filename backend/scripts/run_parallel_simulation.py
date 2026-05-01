@@ -83,6 +83,37 @@ INTERVIEW_STEP_TIMEOUT_SECONDS = 120.0
 _shutdown_event = None
 _cleanup_done = False
 
+
+def ensure_prompt_grounded_initial_posts(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return seed posts; never let OASIS invent an unrelated default topic."""
+    event_config = config.get("event_config", {}) if isinstance(config, dict) else {}
+    initial_posts = [
+        post for post in event_config.get("initial_posts", [])
+        if str(post.get("content", "")).strip()
+    ]
+    if initial_posts:
+        return initial_posts
+
+    requirement = str(config.get("simulation_requirement", "")).strip() if isinstance(config, dict) else ""
+    if not requirement:
+        return []
+
+    compact_requirement = " ".join(requirement.split())
+    if len(compact_requirement) > 900:
+        compact_requirement = compact_requirement[:900].rsplit(" ", 1)[0] + "..."
+
+    return [
+        {
+            "poster_agent_id": 0,
+            "content": (
+                f"Simulation kickoff: {compact_requirement} "
+                "All agents must discuss only this simulation question, use the prompt evidence as the seed context, "
+                "avoid unrelated topics, and produce numeric updates for the requested target variables."
+            ),
+        }
+    ]
+
+
 # 添加 backend 目录到路径
 # 脚本固定位于 backend/scripts/ 目录
 _scripts_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1203,8 +1234,7 @@ async def run_twitter_simulation(
     last_rowid = 0  # 跟踪数据库中最后处理的行号（使用 rowid 避免 created_at 格式差异）
     
     # 执行初始事件
-    event_config = config.get("event_config", {})
-    initial_posts = event_config.get("initial_posts", [])
+    initial_posts = ensure_prompt_grounded_initial_posts(config)
     
     # 记录 round 0 开始（初始事件阶段）
     if action_logger:
@@ -1395,8 +1425,7 @@ async def run_reddit_simulation(
     last_rowid = 0  # 跟踪数据库中最后处理的行号（使用 rowid 避免 created_at 格式差异）
     
     # 执行初始事件
-    event_config = config.get("event_config", {})
-    initial_posts = event_config.get("initial_posts", [])
+    initial_posts = ensure_prompt_grounded_initial_posts(config)
     
     # 记录 round 0 开始（初始事件阶段）
     if action_logger:

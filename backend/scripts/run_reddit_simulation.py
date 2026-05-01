@@ -81,6 +81,56 @@ class MaxTokensWarningFilter(logging.Filter):
 logging.getLogger().addFilter(MaxTokensWarningFilter())
 
 
+def _compact_text(value: str, max_chars: int = 1200) -> str:
+    """Normalize long prompt/context text into one safe seed-post paragraph."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(" ", 1)[0].rstrip(" .,;:") + "..."
+
+
+def ensure_prompt_grounded_initial_posts(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return configured seed posts, or create one from the current prompt.
+
+    OASIS can otherwise drift into generic built-in topics when no initial
+    event is provided. Horizon XL must start every debate from the active
+    simulation question so domains do not bleed across runs.
+    """
+    event_config = config.get("event_config", {}) if isinstance(config, dict) else {}
+    initial_posts = [
+        post for post in event_config.get("initial_posts", [])
+        if str(post.get("content", "")).strip()
+    ]
+    if initial_posts:
+        return initial_posts
+
+    requirement = (
+        config.get("simulation_requirement")
+        or config.get("requirement")
+        or config.get("question")
+        or ""
+    )
+    context = (
+        config.get("document_text")
+        or config.get("background_context")
+        or config.get("context")
+        or ""
+    )
+    seed_text = _compact_text(f"{requirement}\n\n{context}".strip())
+    if not seed_text:
+        seed_text = "No prompt was provided. Pause the simulation and request a clear simulation question before debating."
+
+    return [{
+        "poster_agent_id": 0,
+        "content": (
+            "Simulation kickoff: "
+            f"{seed_text} "
+            "All agents must stay on this exact simulation question, cite only relevant evidence, "
+            "challenge unsupported assumptions, and produce numeric updates when the task asks for forecasts."
+        )
+    }]
+
+
 def setup_oasis_logging(log_dir: str):
     """配置 OASIS 的日志，使用固定名称的日志文件"""
     os.makedirs(log_dir, exist_ok=True)
@@ -588,12 +638,12 @@ class RedditSimulationRunner:
         self.ipc_handler = IPCHandler(self.simulation_dir, self.env, self.agent_graph)
         self.ipc_handler.update_status("running")
         
-        # 执行初始事件
-        event_config = self.config.get("event_config", {})
-        initial_posts = event_config.get("initial_posts", [])
+        # Seed the environment with prompt-grounded context. Never let OASIS
+        # start from an empty topic, because that can trigger unrelated defaults.
+        initial_posts = ensure_prompt_grounded_initial_posts(self.config)
         
         if initial_posts:
-            print(f"执行初始事件 ({len(initial_posts)}条初始帖子)...")
+            print(f"Executing initial prompt-grounded events ({len(initial_posts)} posts)...")
             initial_actions = {}
             for post in initial_posts:
                 agent_id = post.get("poster_agent_id", 0)
@@ -613,11 +663,11 @@ class RedditSimulationRunner:
                             action_args={"content": content}
                         )
                 except Exception as e:
-                    print(f"  警告: 无法为Agent {agent_id}创建初始帖子: {e}")
+                    print(f"  Warning: could not create initial post for agent {agent_id}: {e}")
             
             if initial_actions:
                 await self.env.step(initial_actions)
-                print(f"  已发布 {len(initial_actions)} 条初始帖子")
+                print(f"  Published {len(initial_actions)} initial posts")
         
         # 主模拟循环
         print("\n开始模拟循环...")
@@ -766,4 +816,3 @@ if __name__ == "__main__":
         pass
     finally:
         print("模拟进程已退出")
-
