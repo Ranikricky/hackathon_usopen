@@ -68,3 +68,15 @@ export function getProject(projectId) {
     method: 'get'
   })
 }
+
+/**
+ * Reset a failed or completed project back to graph-building readiness.
+ * @param {String} projectId - Project ID
+ * @returns {Promise}
+ */
+export function resetProject(projectId) {
+  return service({
+    url: `/api/graph/project/${projectId}/reset`,
+    method: 'post'
+  })
+}

@@ -85,7 +85,7 @@ import { useI18n } from 'vue-i18n'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
-import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
+import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, resetProject } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 
@@ -197,7 +197,27 @@ const retryCurrentStep = async () => {
   if (projectId === 'new') {
     await handleNewProject()
   } else {
-    await loadProject()
+    try {
+      addLog(`Resetting project ${projectId} before retry...`)
+      const res = await resetProject(projectId)
+      if (res.success) {
+        projectData.value = res.data
+        currentPhase.value = res.data.ontology ? 1 : 0
+        addLog('Project reset. Restarting graph build...')
+        if (res.data.ontology) {
+          await startBuildGraph()
+        } else {
+          await loadProject()
+        }
+      } else {
+        error.value = res.error || 'Project reset failed'
+        addLog(`Project reset failed: ${error.value}`)
+      }
+    } catch (err) {
+      const msg = getApiErrorMessage(err, 'Project reset failed')
+      error.value = msg
+      addLog(`Exception in retry: ${msg}`)
+    }
   }
 }
 
@@ -262,7 +282,7 @@ const loadProject = async () => {
     const res = await getProject(currentProjectId.value)
     if (res.success) {
       projectData.value = res.data
-      updatePhaseByStatus(res.data.status)
+      updatePhaseByStatus(res.data.status, res.data.error)
       addLog(`Project loaded. Status: ${res.data.status}`)
       
       if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
@@ -288,13 +308,13 @@ const loadProject = async () => {
   }
 }
 
-const updatePhaseByStatus = (status) => {
+const updatePhaseByStatus = (status, projectError = '') => {
   switch (status) {
     case 'created':
     case 'ontology_generated': currentPhase.value = 0; break;
     case 'graph_building': currentPhase.value = 1; break;
     case 'graph_completed': currentPhase.value = 2; break;
-    case 'failed': error.value = 'Project failed'; break;
+    case 'failed': error.value = projectError || 'Project failed'; break;
   }
 }
 
@@ -441,22 +461,27 @@ onUnmounted(() => {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #FFF;
+  background:
+    radial-gradient(circle at 14% 0%, rgba(23,107,135,0.12), transparent 28rem),
+    radial-gradient(circle at 94% 10%, rgba(192,139,92,0.12), transparent 26rem),
+    var(--hx-bg);
   overflow: hidden;
-  font-family: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
+  font-family: var(--hx-font-body);
 }
 
 /* Header */
 .app-header {
-  height: 60px;
-  border-bottom: 1px solid #EAEAEA;
+  height: 72px;
+  border-bottom: 1px solid var(--hx-line);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 24px;
-  background: #FFF;
+  padding: 0 26px;
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(22px) saturate(1.1);
   z-index: 100;
   position: relative;
+  box-shadow: 0 12px 34px rgba(34,31,25,0.05);
 }
 
 .header-center {
@@ -466,37 +491,49 @@ onUnmounted(() => {
 }
 
 .brand {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 18px;
-  letter-spacing: 1px;
+  font-family: var(--hx-font-display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.18em;
   cursor: pointer;
+}
+
+.brand::before {
+  content: '';
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 11px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--hx-accent), var(--hx-accent-2));
+  box-shadow: 0 0 18px rgba(23,107,135,0.4);
 }
 
 .view-switcher {
   display: flex;
-  background: #F5F5F5;
+  background: rgba(17,19,22,0.055);
   padding: 4px;
-  border-radius: 6px;
+  border: 1px solid var(--hx-line);
+  border-radius: 999px;
   gap: 4px;
 }
 
 .switch-btn {
   border: none;
   background: transparent;
-  padding: 6px 16px;
+  padding: 8px 18px;
   font-size: 12px;
   font-weight: 600;
-  color: #666;
-  border-radius: 4px;
+  color: var(--hx-muted);
+  border-radius: 999px;
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .switch-btn.active {
-  background: #FFF;
-  color: #000;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  background: rgba(255,255,255,0.88);
+  color: var(--hx-ink);
+  box-shadow: 0 8px 22px rgba(34,31,25,0.08);
 }
 
 .status-indicator {
@@ -504,7 +541,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: #666;
+  color: var(--hx-muted);
   font-weight: 500;
 }
 
@@ -522,32 +559,32 @@ onUnmounted(() => {
 }
 
 .step-num {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--hx-font-mono);
   font-weight: 700;
-  color: #999;
+  color: var(--hx-muted);
 }
 
 .step-name {
   font-weight: 700;
-  color: #000;
+  color: var(--hx-ink);
 }
 
 .step-divider {
   width: 1px;
   height: 14px;
-  background-color: #E0E0E0;
+  background-color: var(--hx-line);
 }
 
 .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #CCC;
+  background: var(--hx-faint);
 }
 
-.status-indicator.processing .dot { background: #FF5722; animation: pulse 1s infinite; }
-.status-indicator.completed .dot { background: #4CAF50; }
-.status-indicator.error .dot { background: #F44336; }
+.status-indicator.processing .dot { background: var(--hx-warn); animation: pulse 1s infinite; }
+.status-indicator.completed .dot { background: var(--hx-good); }
+.status-indicator.error .dot { background: var(--hx-danger); }
 
 @keyframes pulse { 50% { opacity: 0.5; } }
 
@@ -567,6 +604,6 @@ onUnmounted(() => {
 }
 
 .panel-wrapper.left {
-  border-right: 1px solid #EAEAEA;
+  border-right: 1px solid var(--hx-line);
 }
 </style>

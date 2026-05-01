@@ -285,7 +285,9 @@ watch(() => props.systemLogs.length, () => {
 <style scoped>
 .workbench-panel {
   height: 100%;
-  background-color: #FAFAFA;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(192,139,92,0.1), transparent 24rem),
+    var(--hx-bg);
   display: flex;
   flex-direction: column;
   position: relative;
@@ -295,25 +297,26 @@ watch(() => props.systemLogs.length, () => {
 .scroll-container {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
+  padding: 28px;
   display: flex;
   flex-direction: column;
   gap: 20px;
 }
 
 .step-card {
-  background: #FFF;
-  border-radius: 8px;
-  padding: 20px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-  border: 1px solid #EAEAEA;
+  background: rgba(255,255,255,0.72);
+  border-radius: var(--hx-radius-lg);
+  padding: 22px;
+  box-shadow: 0 16px 44px rgba(34,31,25,0.06);
+  border: 1px solid var(--hx-line);
+  backdrop-filter: blur(16px);
   transition: all 0.3s ease;
   position: relative; /* For absolute overlay */
 }
 
 .step-card.active {
-  border-color: #FF5722;
-  box-shadow: 0 4px 12px rgba(255, 87, 34, 0.08);
+  border-color: rgba(23,107,135,0.36);
+  box-shadow: 0 18px 52px rgba(23,107,135,0.12);
 }
 
 .card-header {
@@ -330,47 +333,48 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .step-num {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--hx-font-mono);
   font-size: 20px;
   font-weight: 700;
-  color: #E0E0E0;
+  color: rgba(17,19,22,0.18);
 }
 
 .step-card.active .step-num,
 .step-card.completed .step-num {
-  color: #000;
+  color: var(--hx-accent);
 }
 
 .step-title {
   font-weight: 600;
   font-size: 14px;
-  letter-spacing: 0.5px;
+  color: var(--hx-ink);
+  letter-spacing: -0.01em;
 }
 
 .badge {
   font-size: 10px;
-  padding: 4px 8px;
-  border-radius: 4px;
+  padding: 5px 9px;
+  border-radius: 999px;
   font-weight: 600;
   text-transform: uppercase;
 }
 
-.badge.success { background: #E8F5E9; color: #2E7D32; }
-.badge.processing { background: #FF5722; color: #FFF; }
-.badge.accent { background: #FF5722; color: #FFF; }
-.badge.pending { background: #F5F5F5; color: #999; }
-.badge.danger { background: #FFEBE6; color: #B83216; }
+.badge.success { background: rgba(30,127,92,0.1); color: var(--hx-good); }
+.badge.processing { background: rgba(183,110,34,0.12); color: var(--hx-warn); }
+.badge.accent { background: rgba(23,107,135,0.12); color: var(--hx-accent); }
+.badge.pending { background: rgba(17,19,22,0.06); color: var(--hx-muted); }
+.badge.danger { background: rgba(181,70,70,0.1); color: var(--hx-danger); }
 
 .api-note {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--hx-font-mono);
   font-size: 10px;
-  color: #999;
+  color: var(--hx-muted);
   margin-bottom: 8px;
 }
 
 .description {
   font-size: 12px;
-  color: #666;
+  color: var(--hx-muted);
   line-height: 1.5;
   margin-bottom: 16px;
 }
@@ -389,7 +393,7 @@ watch(() => props.systemLogs.length, () => {
 .tag-label {
   display: block;
   font-size: 10px;
-  color: #AAA;
+  color: var(--hx-muted);
   margin-bottom: 8px;
   font-weight: 600;
 }
@@ -401,13 +405,13 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .entity-tag {
-  background: #F5F5F5;
-  border: 1px solid #EEE;
+  background: rgba(255,255,255,0.56);
+  border: 1px solid var(--hx-line);
   padding: 4px 10px;
   border-radius: 4px;
   font-size: 11px;
-  color: #333;
-  font-family: 'JetBrains Mono', monospace;
+  color: var(--hx-ink);
+  font-family: var(--hx-font-mono);
   transition: all 0.2s;
 }
 
@@ -416,8 +420,8 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .entity-tag.clickable:hover {
-    background: #E0E0E0;
-    border-color: #CCC;
+    background: rgba(23,107,135,0.08);
+    border-color: rgba(23,107,135,0.22);
 }
 
 /* Ontology Detail Overlay */
@@ -427,12 +431,12 @@ watch(() => props.systemLogs.length, () => {
     left: 20px;
     right: 20px;
     bottom: 20px;
-    background: rgba(255, 255, 255, 0.98);
+    background: rgba(255, 255, 255, 0.92);
     backdrop-filter: blur(4px);
     z-index: 10;
-    border: 1px solid #EAEAEA;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.05);
-    border-radius: 6px;
+    border: 1px solid var(--hx-line);
+    box-shadow: var(--hx-shadow-soft);
+    border-radius: var(--hx-radius-md);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -446,8 +450,8 @@ watch(() => props.systemLogs.length, () => {
     justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
-    border-bottom: 1px solid #EAEAEA;
-    background: #FAFAFA;
+    border-bottom: 1px solid var(--hx-line);
+    background: rgba(251,250,247,0.84);
 }
 
 .detail-title-group {
@@ -460,7 +464,7 @@ watch(() => props.systemLogs.length, () => {
     font-size: 9px;
     font-weight: 700;
     color: #FFF;
-    background: #000;
+    background: var(--hx-ink);
     padding: 2px 6px;
     border-radius: 2px;
     text-transform: uppercase;
@@ -469,7 +473,7 @@ watch(() => props.systemLogs.length, () => {
 .detail-name {
     font-size: 14px;
     font-weight: 700;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--hx-font-mono);
 }
 
 .close-btn {
@@ -482,7 +486,7 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .close-btn:hover {
-    color: #333;
+    color: var(--hx-ink);
 }
 
 .detail-body {
@@ -586,7 +590,7 @@ watch(() => props.systemLogs.length, () => {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 12px;
-  background: #F9F9F9;
+  background: rgba(17,19,22,0.035);
   padding: 16px;
   border-radius: 6px;
 }
@@ -599,13 +603,13 @@ watch(() => props.systemLogs.length, () => {
   display: block;
   font-size: 20px;
   font-weight: 700;
-  color: #000;
-  font-family: 'JetBrains Mono', monospace;
+  color: var(--hx-ink);
+  font-family: var(--hx-font-mono);
 }
 
 .stat-label {
   font-size: 9px;
-  color: #999;
+  color: var(--hx-muted);
   text-transform: uppercase;
   margin-top: 4px;
   display: block;
@@ -614,11 +618,11 @@ watch(() => props.systemLogs.length, () => {
 /* Step 03 Button */
 .action-btn {
   width: 100%;
-  background: #000;
+  background: linear-gradient(135deg, #111316, #193845);
   color: #FFF;
   border: none;
   padding: 14px;
-  border-radius: 4px;
+  border-radius: var(--hx-radius-md);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -630,7 +634,7 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .action-btn:disabled {
-  background: #CCC;
+  background: rgba(17,19,22,0.12);
   cursor: not-allowed;
 }
 
@@ -639,15 +643,15 @@ watch(() => props.systemLogs.length, () => {
   align-items: center;
   gap: 10px;
   font-size: 12px;
-  color: #FF5722;
+  color: var(--hx-accent);
   margin-bottom: 12px;
 }
 
 .spinner-sm {
   width: 14px;
   height: 14px;
-  border: 2px solid #FFCCBC;
-  border-top-color: #FF5722;
+  border: 2px solid rgba(23,107,135,0.18);
+  border-top-color: var(--hx-accent);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -655,9 +659,9 @@ watch(() => props.systemLogs.length, () => {
 .error-callout {
   margin: 14px 0;
   padding: 14px;
-  border: 1px solid #FF6B35;
-  border-radius: 8px;
-  background: #FFF5F1;
+  border: 1px solid rgba(181,70,70,0.22);
+  border-radius: var(--hx-radius-md);
+  background: rgba(181,70,70,0.06);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -668,7 +672,7 @@ watch(() => props.systemLogs.length, () => {
   display: block;
   font-size: 12px;
   font-weight: 800;
-  color: #B83216;
+  color: var(--hx-danger);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 4px;
@@ -676,7 +680,7 @@ watch(() => props.systemLogs.length, () => {
 
 .error-message {
   margin: 0;
-  color: #5F2A1A;
+  color: #643331;
   font-size: 13px;
   line-height: 1.4;
 }
@@ -684,7 +688,7 @@ watch(() => props.systemLogs.length, () => {
 .retry-btn {
   border: none;
   border-radius: 6px;
-  background: #FF6B35;
+  background: var(--hx-danger);
   color: white;
   font-weight: 800;
   padding: 8px 12px;
@@ -696,22 +700,22 @@ watch(() => props.systemLogs.length, () => {
 
 /* System Logs */
 .system-logs {
-  background: #000;
-  color: #DDD;
+  background: #111316;
+  color: #d7d4cc;
   padding: 16px;
-  font-family: 'JetBrains Mono', monospace;
-  border-top: 1px solid #222;
+  font-family: var(--hx-font-mono);
+  border-top: 1px solid rgba(255,255,255,0.08);
   flex-shrink: 0;
 }
 
 .log-header {
   display: flex;
   justify-content: space-between;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
   padding-bottom: 8px;
   margin-bottom: 8px;
   font-size: 10px;
-  color: #888;
+  color: rgba(255,255,255,0.42);
 }
 
 .log-content {
@@ -728,7 +732,7 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .log-content::-webkit-scrollbar-thumb {
-  background: #333;
+  background: rgba(255,255,255,0.18);
   border-radius: 2px;
 }
 
@@ -740,12 +744,12 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .log-time {
-  color: #666;
+  color: rgba(255,255,255,0.34);
   min-width: 75px;
 }
 
 .log-msg {
-  color: #CCC;
+  color: rgba(255,255,255,0.72);
   word-break: break-all;
 }
 </style>

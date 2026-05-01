@@ -537,14 +537,15 @@ def build_graph():
         project.graph_build_task_id = task_id
         ProjectManager.save_project(project)
 
-        # Local fallback mode: if Zep is not configured, build a visual graph directly from ontology.
-        if use_local_graph:
-            logger.info(f"[{task_id}] ZEP_API_KEY is not configured. Using local graph fallback.")
+        def complete_with_local_graph(mode: str, reason: str = ""):
+            """Build a deterministic local graph when external graph memory is unavailable."""
+            if reason:
+                logger.warning(f"[{task_id}] Falling back to local graph. reason={reason}")
             task_manager.update_task(
                 task_id,
                 status=TaskStatus.PROCESSING,
                 message="Building local graph from ontology...",
-                progress=30
+                progress=70
             )
 
             graph_id = f"local_{uuid.uuid4().hex[:16]}"
@@ -570,8 +571,18 @@ def build_graph():
                     "node_count": node_count,
                     "edge_count": edge_count,
                     "chunk_count": 0,
-                    "mode": "local_ontology_fallback",
+                    "mode": mode,
+                    "fallback_reason": reason,
                 }
+            )
+            return graph_id, graph_data
+
+        # Local fallback mode: if Zep is not configured, build a visual graph directly from ontology.
+        if use_local_graph:
+            logger.info(f"[{task_id}] ZEP_API_KEY is not configured. Using local graph fallback.")
+            complete_with_local_graph(
+                mode="local_ontology_fallback",
+                reason="ZEP_API_KEY is not configured"
             )
 
             return jsonify({
@@ -706,12 +717,24 @@ def build_graph():
                 )
                 
             except Exception as e:
-                # Mark project as failed.
-                build_logger.error(f"[{task_id}] Graph build failed: {str(e)}")
+                # External graph memory can fail because of expired/invalid keys.
+                # Keep the user moving by producing a local graph instead of
+                # leaving the project in a dead failed state.
+                error_text = str(e)
+                if "401" in error_text or "unauthorized" in error_text.lower():
+                    build_logger.warning(f"[{task_id}] Zep authorization failed; using local graph fallback: {error_text}")
+                    complete_with_local_graph(
+                        mode="local_graph_after_zep_auth_failure",
+                        reason="Zep authorization failed"
+                    )
+                    return
+
+                # Mark project as failed for non-auth errors.
+                build_logger.error(f"[{task_id}] Graph build failed: {error_text}")
                 build_logger.debug(traceback.format_exc())
                 
                 project.status = ProjectStatus.FAILED
-                project.error = str(e)
+                project.error = error_text
                 ProjectManager.save_project(project)
                 
                 task_manager.update_task(

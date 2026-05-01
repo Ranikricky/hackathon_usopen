@@ -818,9 +818,11 @@ onUnmounted(() => {
   position: relative;
   width: 100%;
   height: 100%;
-  background-color: #FAFAFA;
-  background-image: radial-gradient(#D0D0D0 1.5px, transparent 1.5px);
-  background-size: 24px 24px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(23,107,135,0.08), transparent 18rem),
+    radial-gradient(rgba(17,19,22,0.09) 1px, transparent 1px),
+    rgba(251,250,247,0.64);
+  background-size: auto, 28px 28px, auto;
   overflow: hidden;
 }
 
@@ -829,20 +831,21 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   right: 0;
-  padding: 16px 20px;
+  padding: 20px 24px;
   z-index: 10;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: linear-gradient(to bottom, rgba(255,255,255,0.95), rgba(255,255,255,0));
+  background: linear-gradient(to bottom, rgba(251,250,247,0.94), rgba(251,250,247,0));
   pointer-events: none;
 }
 
 .panel-title {
   font-size: 14px;
   font-weight: 600;
-  color: #333;
+  color: var(--hx-ink);
   pointer-events: auto;
+  letter-spacing: -0.02em;
 }
 
 .header-tools {
@@ -855,24 +858,25 @@ onUnmounted(() => {
 .tool-btn {
   height: 32px;
   padding: 0 12px;
-  border: 1px solid #E0E0E0;
-  background: #FFF;
-  border-radius: 6px;
+  border: 1px solid var(--hx-line);
+  background: rgba(255,255,255,0.74);
+  border-radius: 999px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   cursor: pointer;
-  color: #666;
+  color: var(--hx-muted);
   transition: all 0.2s;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+  box-shadow: 0 10px 28px rgba(34,31,25,0.06);
   font-size: 13px;
+  backdrop-filter: blur(14px);
 }
 
 .tool-btn:hover {
-  background: #F5F5F5;
-  color: #000;
-  border-color: #CCC;
+  background: rgba(255,255,255,0.94);
+  color: var(--hx-ink);
+  border-color: rgba(23,107,135,0.28);
 }
 
 .tool-btn .btn-text {
@@ -902,7 +906,7 @@ onUnmounted(() => {
   left: 50%;
   transform: translate(-50%, -50%);
   text-align: center;
-  color: #999;
+  color: var(--hx-muted);
 }
 
 .empty-icon {
@@ -916,11 +920,12 @@ onUnmounted(() => {
   position: absolute;
   bottom: 24px;
   left: 24px;
-  background: rgba(255,255,255,0.95);
-  padding: 12px 16px;
-  border-radius: 8px;
-  border: 1px solid #EAEAEA;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+  background: rgba(255,255,255,0.72);
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid var(--hx-line);
+  box-shadow: var(--hx-shadow-soft);
+  backdrop-filter: blur(16px);
   z-index: 10;
 }
 
@@ -928,7 +933,7 @@ onUnmounted(() => {
   display: block;
   font-size: 11px;
   font-weight: 600;
-  color: #E91E63;
+  color: var(--hx-accent);
   margin-bottom: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -946,7 +951,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #555;
+  color: var(--hx-muted);
 }
 
 .legend-dot {
@@ -968,11 +973,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: #FFF;
+  background: rgba(255,255,255,0.74);
   padding: 8px 14px;
   border-radius: 20px;
-  border: 1px solid #E0E0E0;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  border: 1px solid var(--hx-line);
+  box-shadow: 0 10px 28px rgba(34,31,25,0.07);
+  backdrop-filter: blur(14px);
   z-index: 10;
 }
 
