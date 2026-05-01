@@ -78,7 +78,15 @@ def create_app(config_class=Config):
     # Health check.
     @app.route('/health')
     def health():
-        return {'status': 'ok', 'service': 'Horizon XL Backend'}
+        config_warnings = Config.validate()
+        return {
+            'status': 'ok',
+            'service': 'Horizon XL Backend',
+            'configuration': {
+                'ready': not config_warnings,
+                'warnings': config_warnings
+            }
+        }
 
     @app.route('/', defaults={'path': ''})
     @app.route('/<path:path>')

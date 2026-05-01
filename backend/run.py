@@ -22,14 +22,14 @@ from app.config import Config
 
 def main():
     """Run the backend server."""
-    # Validate configuration.
+    # Validate configuration without blocking process startup. Render and other
+    # hosts need /health to respond even when API secrets are added later.
     errors = Config.validate()
     if errors:
-        print("Configuration errors:")
+        print("Configuration warnings:")
         for err in errors:
             print(f"  - {err}")
-        print("\nPlease check the values in your .env file.")
-        sys.exit(1)
+        print("\nThe server will start, but affected API calls will fail until these are configured.")
     
     # Create app.
     app = create_app()
