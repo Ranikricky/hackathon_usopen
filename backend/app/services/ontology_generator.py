@@ -125,6 +125,72 @@ def _score_domain(text: str) -> str:
     return max(priority, key=lambda domain: (scores.get(domain, 0), -priority.index(domain))) if any(scores.values()) else "other"
 
 
+def _extract_explicit_agent_types(text: str, limit: int = 8) -> List[tuple[str, str]]:
+    """Extract user-provided agent roles from prompts before falling back to domain templates."""
+    if not text:
+        return []
+
+    normalized = text.replace("—", "-").replace("–", "-")
+    sections = []
+    for pattern in [
+        r"agent architecture.*?(?:target variables|time-pocket|scenario paths|data tables|final horizon|$)",
+        r"agents include.*?(?:\.|\n\n|$)",
+        r"agents?:.*?(?:\.|\n\n|$)",
+    ]:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            sections.append(match.group(0))
+
+    if not sections:
+        return []
+
+    candidate_text = "\n".join(sections)
+    candidate_text = re.sub(r"\bas previously defined\b", "", candidate_text, flags=re.IGNORECASE)
+    candidate_text = re.sub(r"agent architecture|agents include|agents?", "", candidate_text, flags=re.IGNORECASE)
+    candidate_text = re.sub(r"\b\d+\s*-\s*\d+\b", "", candidate_text)
+    candidate_text = candidate_text.replace("/", " ")
+
+    # Keep the right side of explanatory clauses such as "... - TMC strategist, BJP strategist".
+    if " - " in candidate_text:
+        candidate_text = candidate_text.split(" - ", 1)[1]
+
+    raw_items = re.split(r",|;|\n|\band\b", candidate_text, flags=re.IGNORECASE)
+    stop_phrases = {
+        "as previously defined", "target variables", "time pocket simulation plan",
+        "scenario paths", "data tables", "final horizon xl prompt", "defined",
+    }
+    results: List[tuple[str, str]] = []
+    seen = set()
+
+    for raw in raw_items:
+        cleaned = re.sub(r"[^a-zA-Z0-9 /_-]+", " ", raw).strip(" -_/").strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        lowered = cleaned.lower()
+        if not cleaned or lowered in stop_phrases:
+            continue
+        if len(cleaned) < 4 or len(cleaned.split()) > 6:
+            continue
+        if not any(keyword in lowered for keyword in [
+            "agent", "strategist", "observer", "analyst", "pollster", "worker",
+            "watchdog", "beneficiary", "voter", "journalist", "negotiator",
+            "representative", "bloc", "official", "regulator", "trader",
+            "producer", "buyer", "supplier", "developer", "operator",
+            "delegate", "refiner", "minister", "reporter", "campaign",
+            "party", "media", "business", "consumer",
+        ]):
+            continue
+
+        entity_name = _to_pascal_case(cleaned)
+        if entity_name in {"Agent", "Agents", "Person", "Organization"} or entity_name in seen:
+            continue
+        seen.add(entity_name)
+        results.append((entity_name, f"User-defined simulation actor: {cleaned}."))
+        if len(results) >= limit:
+            break
+
+    return results
+
+
 # Ontology generation system prompt.
 ONTOLOGY_SYSTEM_PROMPT = """You are an expert knowledge-graph ontology designer. Analyze the supplied documents and simulation requirement, then design entity and relationship types for a social/public-opinion simulation.
 
@@ -304,6 +370,38 @@ Required rules:
         
         return message
 
+    def _build_ontology_payload(
+        self,
+        entity_types: List[tuple[str, str]],
+        edge_types: List[tuple[str, str, str, str]],
+        summary: str
+    ) -> Dict[str, Any]:
+        """Build the normalized fallback ontology payload."""
+        return {
+            "entity_types": [
+                {
+                    "name": name,
+                    "description": description,
+                    "attributes": [
+                        {"name": "role", "type": "text", "description": "Actor role in the simulation"},
+                        {"name": "position", "type": "text", "description": "Public stance or institutional position"},
+                    ],
+                    "examples": [],
+                }
+                for name, description in entity_types
+            ],
+            "edge_types": [
+                {
+                    "name": name,
+                    "description": description,
+                    "source_targets": [{"source": source, "target": target}],
+                    "attributes": [],
+                }
+                for name, description, source, target in edge_types
+            ],
+            "analysis_summary": summary,
+        }
+
     def _fallback_ontology(
         self,
         simulation_requirement: str,
@@ -313,6 +411,36 @@ Required rules:
         """Return a safe English ontology when the LLM is unavailable or returns invalid JSON."""
         text = " ".join([simulation_requirement or "", additional_context or "", " ".join(document_texts or [])]).lower()
         domain = _score_domain(text)
+        explicit_agents = _extract_explicit_agent_types(
+            " ".join([simulation_requirement or "", additional_context or "", " ".join(document_texts or [])])
+        )
+
+        if explicit_agents:
+            entity_types = explicit_agents + [
+                ("Person", "Any individual person not fitting another specific type."),
+                ("Organization", "Any organization not fitting another specific type."),
+            ]
+            actor_names = [name for name, _ in explicit_agents]
+            first = actor_names[0]
+            second = actor_names[1] if len(actor_names) > 1 else "Organization"
+            third = actor_names[2] if len(actor_names) > 2 else "Person"
+            fourth = actor_names[3] if len(actor_names) > 3 else "Organization"
+            fifth = actor_names[4] if len(actor_names) > 4 else "Person"
+            sixth = actor_names[5] if len(actor_names) > 5 else "Organization"
+            seventh = actor_names[6] if len(actor_names) > 6 else "Person"
+            eighth = actor_names[7] if len(actor_names) > 7 else "Organization"
+            edge_types = [
+                ("INFLUENCES", "Influences another simulation actor or voter bloc.", first, fourth),
+                ("CONTESTS_WITH", "Competes or disagrees with another actor.", first, second),
+                ("NEGOTIATES_WITH", "Negotiates alliances, commitments, or coordination.", third, "Organization"),
+                ("REPORTS_SIGNAL", "Reports ground, polling, market, or narrative signals.", seventh, eighth),
+                ("REPRESENTS", "Represents lived experience or group interests.", fifth, "Person"),
+                ("ADVISES", "Provides analysis, strategy, or recommendations.", eighth, first),
+                ("REACTS_TO", "Revises behavior after another actor's signal.", sixth, second),
+                ("AMPLIFIES", "Amplifies information, sentiment, or turnout effects.", "Organization", fourth),
+            ]
+            summary = f"Fallback {domain} ontology using explicit agent roles supplied in the prompt."
+            return self._build_ontology_payload(entity_types, edge_types, summary)
 
         if domain == "election":
             is_bengal = any(term in text for term in ["west bengal", "bengal", "tmc", "aitc", "mamata", "bjp", "lakshmir"])
