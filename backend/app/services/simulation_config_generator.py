@@ -798,14 +798,8 @@ JSON shape:
     ) -> EventConfig:
         """Ensure external-research needs are explicitly presented to agents."""
         text = f"{simulation_requirement or ''}\n{document_text or ''}".lower()
-        wants_external_research = any(
-            term in text
-            for term in [
-                "web scrape", "webscrape", "scrape", "latest", "news", "article",
-                "source", "poll", "survey", "external research", "fresh data",
-            ]
-        )
-        if not wants_external_research:
+        research_disabled = bool(re.search(r"\b(no|disable|without)\s+(web|search|scrap|external research)\b", text))
+        if research_disabled:
             return event_config
 
         existing = " ".join(str(post.get("content", "")) for post in event_config.initial_posts).lower()
@@ -818,11 +812,10 @@ JSON shape:
             "DataRetrievalAnalyst",
             "EvidenceAuditor",
             "QuantitativeSynthesizer",
-            "PollsterDataScientist",
-            "PollsterDataAnalyst",
-            "PoliticalJournalist",
-            "MediaOutlet",
-            "Journalist",
+            "NegotiationMediator",
+            "SimulationModerator",
+            "GroundSignalReporter",
+            "DomainExpertAnalyst",
         ]
         poster_type = next(
             (candidate for candidate in preferred_types if candidate in available_types),
@@ -913,55 +906,34 @@ JSON shape:
         return event_config
 
     def _choose_seed_poster_type(self, available_types: List[str], text: str) -> str:
-        """Pick a domain-appropriate seed poster from generated entity types."""
-        lowered = text.lower()
-        preferred_by_domain = []
-
-        if any(term in lowered for term in ["election", "vote share", "seat share", "turnout", "tmc", "bjp", "west bengal"]):
-            preferred_by_domain = [
-                "PollsterDataScientist",
-                "PollsterDataAnalyst",
-                "PoliticalJournalist",
-                "RegionalGroundObserver",
-                "MediaOutlet",
-                "Journalist",
-            ]
-        elif any(term in lowered for term in ["oil", "brent", "wti", "opec", "crude"]):
-            preferred_by_domain = ["InventoryReporter", "DemandAnalyst", "CommodityTrader", "MediaOutlet", "Journalist"]
-        elif any(term in lowered for term in ["ai", "artificial intelligence", "frontier model", "enterprise adoption"]):
-            preferred_by_domain = ["Regulator", "EnterpriseBuyer", "FrontierLab", "MediaOutlet", "Journalist"]
-        else:
-            preferred_by_domain = [
-                "ExternalResearchScout",
-                "DataRetrievalAnalyst",
-                "EvidenceAuditor",
-                "QuantitativeSynthesizer",
-                "MediaOutlet",
-                "Journalist",
-                "Expert",
-            ]
-
+        """Pick a process/data actor first, otherwise use a context actor."""
+        preferred_by_domain = [
+            "SimulationModerator",
+            "ExternalResearchScout",
+            "DataRetrievalAnalyst",
+            "EvidenceAuditor",
+            "QuantitativeSynthesizer",
+            "NegotiationMediator",
+            "GroundSignalReporter",
+            "DomainExpertAnalyst",
+            "Person",
+            "Organization",
+        ]
         return next(
             (candidate for candidate in preferred_by_domain if candidate in available_types),
             available_types[0] if available_types else "Unknown",
         )
 
     def _infer_seed_domain(self, text: str) -> str:
-        """Return a human-readable domain label for seed posts."""
-        lowered = text.lower()
-        if any(term in lowered for term in ["west bengal", "tmc", "aitc", "bjp", "vote share", "seat share", "turnout"]):
-            return "the West Bengal election forecast"
-        if "election" in lowered or "polling" in lowered:
-            return "the election forecast"
-        if any(term in lowered for term in ["oil", "brent", "wti", "opec", "crude"]):
-            return "the oil-market forecast"
-        if any(term in lowered for term in ["ai", "artificial intelligence", "frontier model"]):
-            return "the AI future simulation"
-        if any(term in lowered for term in ["tariff", "trade agreement", "supply chain"]):
-            return "the trade or supply-chain simulation"
-        if any(term in lowered for term in ["unemployment", "gdp", "inflation", "central bank"]):
-            return "the macroeconomic forecast"
-        return "the requested future simulation"
+        """Return a prompt-derived label for seed posts without fixed domains."""
+        cleaned = re.sub(r"https?://\S+", " ", text or "")
+        cleaned = re.sub(r"[^a-zA-Z0-9 %/_-]+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        match = re.search(r"(?:simulate|forecast|predict|analyze|model)\s+(.{8,120})", cleaned, re.IGNORECASE)
+        phrase = match.group(1) if match else cleaned
+        phrase = re.split(r"\b(?:using|based on|with|from|do not|produce|output)\b", phrase, maxsplit=1, flags=re.IGNORECASE)[0]
+        label = " ".join(phrase.split()[:8]).strip()
+        return f"the {label} simulation" if label else "the requested future simulation"
 
     def _summarize_requirement(self, text: str, max_chars: int = 700) -> str:
         """Compact the user requirement into a safe discussion seed."""
@@ -973,26 +945,18 @@ JSON shape:
         return cleaned[:max_chars].rsplit(" ", 1)[0] + "..."
 
     def _extract_hot_topics(self, text: str, limit: int = 10) -> List[str]:
-        """Extract simple prompt-grounded hot topics for recommendation context."""
-        lowered = (text or "").lower()
-        topic_candidates = [
-            ("West Bengal election", ["west bengal", "tmc", "aitc", "bjp"]),
-            ("vote share", ["vote share"]),
-            ("seat share", ["seat share", "seat projection"]),
-            ("turnout", ["turnout"]),
-            ("women voters", ["women", "lakshmir"]),
-            ("minority consolidation", ["minority", "muslim", "sir"]),
-            ("anti-incumbency", ["anti-incumbency", "scam", "corruption"]),
-            ("regional swing", ["region", "north bengal", "jungle mahal", "kolkata"]),
-            ("exit polls", ["exit poll"]),
-            ("no future leakage", ["cut-off", "cutoff", "do not use future", "future leakage"]),
-            ("oil prices", ["brent", "wti", "opec", "crude"]),
-            ("AI adoption", ["ai adoption", "frontier model", "enterprise adoption"]),
-        ]
-        topics = [
-            label for label, terms in topic_candidates
-            if any(term in lowered for term in terms)
-        ]
+        """Extract prompt-grounded topic phrases without domain dictionaries."""
+        cleaned = re.sub(r"https?://\S+", " ", text or "")
+        cleaned = re.sub(r"[^a-zA-Z0-9 %/_-]+", " ", cleaned)
+        phrases = []
+        for match in re.finditer(r"\b([A-Za-z][A-Za-z0-9_-]*(?:\s+[A-Za-z][A-Za-z0-9_-]*){1,3})\b", cleaned):
+            phrase = re.sub(r"\s+", " ", match.group(1)).strip()
+            lowered = phrase.lower()
+            if len(lowered) < 6 or lowered in {"using only", "do not", "based on", "future simulation"}:
+                continue
+            if any(term in lowered for term in ["forecast", "predict", "simulate", "share", "rate", "risk", "scenario", "turnout", "demand", "supply", "price", "policy", "adoption", "confidence", "research", "source"]):
+                phrases.append(lowered)
+        topics = list(dict.fromkeys(phrases))
         return topics[:limit]
     
     def _assign_initial_post_agents(

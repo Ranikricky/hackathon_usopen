@@ -207,43 +207,22 @@ class ExternalResearchService:
         }
 
     def build_queries(self, prompt: str, additional_context: str = "") -> List[str]:
-        """Create source-diverse searches from the user question."""
+        """Create source-diverse searches from the user question.
+
+        Keep this generic. Domain-specific terms should come from the prompt or
+        uploaded context itself, not from hardcoded query branches.
+        """
         text = TextProcessor.preprocess_text(f"{prompt or ''}\n{additional_context or ''}")
         compact = " ".join(text.split())[:180]
-        lowered = text.lower()
-
-        if any(term in lowered for term in ["election", "vote share", "seat share", "turnout", "poll", "west bengal", "bjp", "tmc"]):
-            base = compact or "election forecast"
-            queries = [
-                f"{base} latest polls turnout vote share seat share",
-                f"{base} site:reddit.com voter sentiment discussion",
-                f"{base} political analysis blog regional swing",
-                f"{base} election research paper turnout polling error",
-            ]
-        elif any(term in lowered for term in ["oil", "brent", "wti", "opec", "crude"]):
-            base = compact or "oil price forecast"
-            queries = [
-                f"{base} supply demand inventories OPEC analysis",
-                f"{base} crude oil market research paper",
-                f"{base} trader commentary blog",
-                f"{base} site:reddit.com oil market discussion",
-            ]
-        elif any(term in lowered for term in ["ai", "artificial intelligence", "llm", "frontier model"]):
-            base = compact or "AI future forecast"
-            queries = [
-                f"{base} adoption research paper enterprise regulation",
-                f"{base} frontier labs open source commentary",
-                f"{base} AI policy blog analysis",
-                f"{base} site:reddit.com AI adoption discussion",
-            ]
-        else:
-            base = compact or "future scenario analysis"
-            queries = [
-                f"{base} research paper literature review",
-                f"{base} news analysis recent context",
-                f"{base} expert blog analysis",
-                f"{base} site:reddit.com public discussion",
-            ]
+        base = compact or "future scenario analysis"
+        queries = [
+            f"{base} latest evidence data numbers source",
+            f"{base} research paper literature review",
+            f"{base} news analysis recent context",
+            f"{base} expert blog analysis",
+            f"{base} site:reddit.com public discussion",
+            f"{base} dataset statistics historical context",
+        ]
 
         cutoff = self._extract_cutoff_hint(text)
         if cutoff:

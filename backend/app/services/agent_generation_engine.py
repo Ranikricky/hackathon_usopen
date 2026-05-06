@@ -26,7 +26,7 @@ class AgentGenerationEngine:
         self,
         domain_plan: Dict[str, Any],
         evidence_summary: str = "",
-        use_llm: bool = False,
+        use_llm: bool = True,
     ) -> List[Dict[str, Any]]:
         if not domain_plan:
             raise ValueError("domain_plan is required to generate agents.")
@@ -101,7 +101,7 @@ The agents must answer:
 Simulation plan:
 {domain_plan}
 
-Evidence summary:
+Uploaded/context/research evidence summary:
 {evidence_summary[:8000]}
 
 Fresh generation seed:
@@ -111,8 +111,12 @@ Use the seed only to vary secondary character framing, information access,
 and interaction style. Preserve the core causal actors required by the plan.
 Follow agent_population.allocations exactly when it is present: expand an
 archetype into multiple agents when instance_count is greater than 1, use its
-subtypes for variation, and include the orchestration/research agents. Do not
-collapse the roster back to a fixed set of 10 generic agents.
+subtypes for variation, and include the moderator, mediator, evidence, quant,
+external research, and data retrieval agents. Do not collapse the roster back to
+a fixed set of 10 generic agents.
+
+Domain-specific names are allowed only if they are present in the plan or
+evidence summary. They must not come from hidden templates.
 """
         result = self.llm_client.chat_json(
             messages=[

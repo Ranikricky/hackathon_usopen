@@ -244,7 +244,8 @@ def generate_structured_agents():
 
         agents = AgentGenerationEngine().generate_agents(
             domain_plan,
-            use_llm=bool(data.get("use_llm", False)),
+            evidence_summary=data.get("evidence_summary") or "",
+            use_llm=data.get("use_llm", True) is not False,
         )
         return jsonify({
             "success": True,
@@ -399,7 +400,7 @@ def create_simulation():
                 agents=AgentGenerationEngine().generate_agents(
                     domain_plan,
                     document_text[:8000],
-                    use_llm=bool(data.get("use_llm_agents", False)),
+                    use_llm=data.get("use_llm_agents", True) is not False,
                 ),
             )
         

@@ -167,7 +167,7 @@ class SimulationStateManager:
                     "information_set": [archetype.get("information_advantage", "")],
                     "trusted_data_sources": [],
                     "ignored_or_underweighted_data": [],
-                    "forecasting_method": "Domain-specific judgment constrained by structured numeric outputs.",
+                    "forecasting_method": "Context-specific judgment constrained by structured numeric outputs.",
                     "heuristics": [],
                     "biases": [archetype.get("likely_bias", "")] if archetype.get("likely_bias") else [],
                     "blind_spots": [],
