@@ -145,18 +145,22 @@ def _split_items(text: str) -> List[str]:
 
 
 def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
+    source_text = (text or "").replace("U.S.", "US").replace("U.K.", "UK")
     sections = []
-    for pattern in [
+    target_section = re.search(
         r"target variables?\s*(?:[:=-]|\n)(.*?)(?:agent|scenario|time[- ]?pocket|final|$)",
-        r"(?:forecast|predict|estimate|simulate)\s+([^.;\n]+)",
-    ]:
-        match = re.search(pattern, text or "", flags=re.IGNORECASE | re.DOTALL)
-        if match:
-            sections.append(match.group(1))
+        source_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if target_section:
+        sections.append(target_section.group(1))
+    for match in re.finditer(r"(?:forecast|predict|estimate|simulate)\s+([^.;\n]+)", source_text, flags=re.IGNORECASE):
+        sections.append(match.group(1))
     items = []
     seen = set()
     for section in sections:
-        for raw in _split_items(section):
+        cleaned_section = _clean_target_section(section)
+        for raw in _split_items(cleaned_section):
             lowered = raw.lower()
             if any(stop in lowered for stop in ["using only", "information available", "based on", "different agents"]):
                 continue
@@ -182,6 +186,27 @@ def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
         "required": True,
         "description": "Primary simulated outcome requested by the user.",
     }]
+
+
+def _clean_target_section(section: str) -> str:
+    """Keep requested outcomes separate from drivers, evidence, and horizon text."""
+    cleaned = (section or "").replace("U.S.", "US").replace("U.K.", "UK")
+    nested = list(re.finditer(r"(?:forecast|predict|estimate|simulate)\s+(.+)$", cleaned, flags=re.IGNORECASE))
+    if nested:
+        cleaned = nested[-1].group(1)
+    cleaned = re.split(
+        r"\b(?:using|based on|considering|with help from|while considering|taking into account|driven by|affected by|impacted by|because of|given)\b",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    cleaned = re.split(
+        r"\b(?:over|for|during|through|until)\s+(?:the\s+)?(?:next|coming|following|\d+\s+(?:day|days|week|weeks|month|months|quarter|quarters|year|years)|\d{4})",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return cleaned.strip(" .,:;-") or section
 
 
 def _infer_unit(text: str) -> str:
@@ -314,7 +339,7 @@ def _looks_actorish(value: str) -> bool:
     if not lowered or any(stop in lowered for stop in ["target variable", "scenario", "data table", "copy paste", "simulation question"]):
         return False
     words = set(re.findall(r"[a-z0-9]+", lowered))
-    return bool(words & ACTOR_HINT_WORDS) or bool(re.fullmatch(r"[A-Z]{2,8}", value.strip()))
+    return bool(words & ACTOR_HINT_WORDS) or bool(re.fullmatch(r"[A-Z]{3,8}", value.strip()))
 
 
 def _title_role(value: str) -> str:
@@ -694,7 +719,7 @@ Rules:
                 weight = 2.6
             if any(term in name for term in ["data", "analyst", "research", "expert", "scientist"]):
                 weight = max(weight, 1.3)
-            if any(term in lowered for term in ["common people", "public", "mass", "turnout", "adoption", "demand"]):
+            if any(term in lowered for term in ["common people", "public", "mass", "participation", "adoption", "demand"]):
                 if any(term in name for term in ["people", "participant", "consumer", "voter", "worker", "citizen", "household", "community", "user"]):
                     weight *= 1.7
             weights.append(weight)

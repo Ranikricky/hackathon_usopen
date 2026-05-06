@@ -137,14 +137,15 @@ def _infer_local_agent_population(simulation_requirement: str, entity_names: lis
         return {name: 1 for name in entity_names}
 
     complexity_terms = [
-        "region", "district", "segment", "bloc", "voter", "people", "consumer",
-        "public", "scenario", "seat", "vote share", "turnout", "monthly", "weekly",
-        "data", "research", "web scrape", "poll", "forecast", "uncertainty",
+        "region", "locality", "segment", "group", "people", "participant",
+        "population", "public", "scenario", "variable", "metric", "numeric",
+        "monthly", "weekly", "daily", "data", "source", "research", "web",
+        "scrape", "forecast", "uncertainty", "timeline", "signal",
     ]
     complexity = sum(1 for term in complexity_terms if term in text)
     target_count = max(10, min(36, 10 + complexity + max(0, len(custom_names) - 5)))
 
-    control_count = 5
+    control_count = 6
     fallback_count = sum(1 for name in entity_names if name in {"Person", "Organization"})
     causal_target = max(len(custom_names), target_count - control_count - fallback_count)
 
@@ -181,14 +182,14 @@ def _local_instance_name(entity_name: str, copy_index: int, total: int, simulati
     if total <= 1:
         return entity_name
     lowered = entity_name.lower()
-    if "voter" in lowered or "beneficiary" in lowered or "people" in lowered:
-        labels = ["Rural", "Urban", "Youth", "Women", "Minority", "Regional", "Swing", "Working-class"]
+    if "voter" in lowered or "beneficiary" in lowered or "people" in lowered or "participant" in lowered:
+        labels = ["High-Exposure", "Low-Exposure", "Early-Mover", "Late-Mover", "Information-Rich", "Information-Poor", "Resource-Constrained", "Swing"]
     elif "observer" in lowered:
-        labels = ["North", "South", "Urban", "Rural", "Border", "Industrial", "Field", "District"]
+        labels = ["Field", "Local", "Network", "Operational", "Boundary", "Contrarian", "Signal-Rich", "Sparse-Signal"]
     elif "analyst" in lowered or "pollster" in lowered:
-        labels = ["Model", "Ground", "Survey", "Regional", "Skeptical", "Turnout", "Scenario", "Data"]
+        labels = ["Model-Led", "Ground-Signal", "Source-Auditing", "Skeptical", "Scenario", "Data", "Consensus", "Tail-Risk"]
     elif "strategist" in lowered or "campaign" in lowered:
-        labels = ["Core", "Field", "Media", "Data", "Regional", "Alliance", "Turnout", "Opposition"]
+        labels = ["Core", "Field", "Narrative", "Data", "Coordination", "Tradeoff", "Adaptation", "Countermove"]
     else:
         labels = ["A", "B", "C", "D", "E", "F", "G", "H"]
     label = labels[(copy_index - 1) % len(labels)]
@@ -248,6 +249,7 @@ def _build_local_graph_from_ontology(
         ("ExternalResearchScout", "Fetches or summarizes approved external web/source pointers outside graph memory."),
         ("DataRetrievalAnalyst", "Extracts numbers, units, dates, and missing-data warnings."),
         ("QuantitativeSynthesizer", "Turns agent positions into numeric scenario tables and confidence bands."),
+        ("NegotiationMediator", "Surfaces disagreement, pressure points, tradeoffs, and possible compromise paths."),
     ]
     for entity_name, description in control_nodes:
         if entity_name in entity_uuid_map:

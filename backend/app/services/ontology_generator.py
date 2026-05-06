@@ -207,7 +207,7 @@ def _actor_items_from_text(text: str, limit: int = 18) -> List[Tuple[str, str]]:
         if _looks_like_named_actor(phrase, source_text):
             candidates.append(phrase)
 
-    for match in re.finditer(r"\b([A-Z]{2,8}(?:\([A-Z]+\))?)\b", source_text):
+    for match in re.finditer(r"\b([A-Z]{3,8}(?:\([A-Z]+\))?)\b", source_text):
         phrase = match.group(1).strip()
         if _looks_like_named_actor(phrase, source_text):
             candidates.append(phrase)
@@ -251,7 +251,7 @@ def _looks_like_named_actor(phrase: str, full_text: str) -> bool:
         return False
     if lowered in {"horizon xl", "source notes", "external research packet"}:
         return False
-    if re.fullmatch(r"[A-Z]{2,8}(?:\([A-Z]+\))?", phrase):
+    if re.fullmatch(r"[A-Z]{3,8}(?:\([A-Z]+\))?", phrase):
         return True
     window_pattern = re.escape(phrase)
     match = re.search(window_pattern, full_text or "")
