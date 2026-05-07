@@ -24,6 +24,7 @@ from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
 from ..models.task import TaskManager, TaskStatus
 from ..models.project import ProjectManager, ProjectStatus
+from ..services.local_graph_repair import get_or_repair_local_graph
 
 logger = get_logger('horizonxl.api')
 
@@ -964,12 +965,24 @@ def get_graph_data(graph_id: str):
     """
     try:
         if graph_id.startswith("local_"):
-            local_graph = ProjectManager.get_local_graph_by_graph_id(graph_id)
+            local_graph = get_or_repair_local_graph(graph_id)
             if not local_graph:
                 return jsonify({
-                    "success": False,
-                    "error": f"Graph does not exist: {graph_id}"
-                }), 404
+                    "success": True,
+                    "data": {
+                        "graph_id": graph_id,
+                        "nodes": [],
+                        "edges": [],
+                        "node_count": 0,
+                        "edge_count": 0,
+                        "mode": "missing_local_graph",
+                        "stale": True,
+                        "warning": (
+                            f"Graph memory for {graph_id} is unavailable. "
+                            "The simulation chat can continue from saved report and simulation state."
+                        ),
+                    }
+                })
             return jsonify({
                 "success": True,
                 "data": local_graph

@@ -20,7 +20,7 @@ from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
 from ..utils.locale import get_locale, t
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
-from ..models.project import ProjectManager
+from .local_graph_repair import get_or_repair_local_graph
 
 logger = get_logger('horizonxl.zep_tools')
 
@@ -448,10 +448,19 @@ class ZepToolsService:
             raise ValueError("ZEP_API_KEY is not configured")
 
     def _get_local_graph_data(self, graph_id: str) -> Dict[str, Any]:
-        graph_data = ProjectManager.get_local_graph_by_graph_id(graph_id)
-        if not graph_data:
-            raise ValueError(f"Local graph does not exist: {graph_id}")
-        return graph_data
+        graph_data = get_or_repair_local_graph(graph_id)
+        if graph_data:
+            return graph_data
+        return {
+            "graph_id": graph_id,
+            "nodes": [],
+            "edges": [],
+            "node_count": 0,
+            "edge_count": 0,
+            "mode": "missing_local_graph",
+            "stale": True,
+            "warning": f"Local graph memory is unavailable: {graph_id}",
+        }
     
     @property
     def llm(self) -> LLMClient:

@@ -12,7 +12,7 @@ from zep_cloud.client import Zep
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
-from ..models.project import ProjectManager
+from .local_graph_repair import get_or_repair_local_graph
 
 logger = get_logger('horizonxl.zep_entity_reader')
 
@@ -88,13 +88,22 @@ class ZepEntityReader:
 
     def _require_client(self):
         if not self.client:
-            raise ValueError("ZEP_API_KEY 未配置")
+            raise ValueError("ZEP_API_KEY is not configured")
 
     def _get_local_graph_data(self, graph_id: str) -> Dict[str, Any]:
-        graph_data = ProjectManager.get_local_graph_by_graph_id(graph_id)
-        if not graph_data:
-            raise ValueError(f"本地图谱不存在: {graph_id}")
-        return graph_data
+        graph_data = get_or_repair_local_graph(graph_id)
+        if graph_data:
+            return graph_data
+        return {
+            "graph_id": graph_id,
+            "nodes": [],
+            "edges": [],
+            "node_count": 0,
+            "edge_count": 0,
+            "mode": "missing_local_graph",
+            "stale": True,
+            "warning": f"Local graph memory is unavailable: {graph_id}",
+        }
     
     def _call_with_retry(
         self, 
@@ -530,4 +539,3 @@ class ZepEntityReader:
             enrich_with_edges=enrich_with_edges
         )
         return result.entities
-
