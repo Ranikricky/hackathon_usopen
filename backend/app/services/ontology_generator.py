@@ -178,12 +178,14 @@ def _actor_items_from_text(text: str, limit: int = 18) -> List[Tuple[str, str]]:
     source_text = (text or "").replace("U.S.", "US").replace("U.K.", "UK")
 
     for pattern in [
-        r"(?:considering|using|involving|including|with)\s+([^.;\n]+)",
+        r"(?:considering|using|involving|include|includes|including|with)\s+([^.;\n]+)",
         r"(?:driven by|impacted by|affected by)\s+([^.;\n]+)",
     ]:
         for match in re.finditer(pattern, source_text, flags=re.IGNORECASE):
             for item in re.split(r",|;|\n|\band\b", match.group(1), flags=re.IGNORECASE):
                 cleaned = re.sub(r"^[\s\-*•\d.)]+", "", item)
+                cleaned = re.sub(r"^(?:include|includes|including|considering|with)\s+", "", cleaned, flags=re.IGNORECASE)
+                cleaned = re.split(r"\b(?:only if|if supported|when supported)\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
                 cleaned = re.sub(r"[^a-zA-Z0-9&/ _.'-]+", " ", cleaned)
                 cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_/")
                 if 2 <= len(cleaned) <= 70 and len(cleaned.split()) <= 5:
@@ -192,6 +194,8 @@ def _actor_items_from_text(text: str, limit: int = 18) -> List[Tuple[str, str]]:
     listish = re.split(r",|;|\n|\band\b", source_text, flags=re.IGNORECASE)
     for raw in listish:
         cleaned = re.sub(r"^[\s\-*•\d.)]+", "", raw)
+        cleaned = re.sub(r"^(?:include|includes|including|considering|with)\s+", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.split(r"\b(?:only if|if supported|when supported)\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
         if ":" in cleaned or "=" in cleaned:
             parts = re.split(r"[:=]", cleaned, maxsplit=1)
             left = parts[0].strip().lower()

@@ -16,6 +16,7 @@ from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..services.domain_simulation_planner import DomainSimulationPlanner
 from ..services.agent_generation_engine import AgentGenerationEngine
+from ..services.external_research import ExternalResearchService
 from ..services.numeric_validation import NumericValidationService
 from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
@@ -193,6 +194,27 @@ def plan_simulation():
                 "error": "A prompt or project simulation requirement is required."
             }), 400
 
+        research_packet = None
+        if data.get("include_external_research", True) is not False:
+            try:
+                research_packet = ExternalResearchService(max_queries=3, max_results=5).collect(
+                    prompt=prompt,
+                    additional_context=document_text[:5000],
+                )
+                research_markdown = research_packet.get("markdown") if isinstance(research_packet, dict) else ""
+                if research_markdown:
+                    document_text = f"{document_text}\n\n=== EXTERNAL_RESEARCH_PACKET ===\n{research_markdown}"
+                    if project:
+                        ProjectManager.save_external_research(project.project_id, research_packet)
+                        project.external_research = {
+                            "enabled": True,
+                            "source_count": len(research_packet.get("sources", [])),
+                            "query_count": len(research_packet.get("queries", [])),
+                        }
+                        ProjectManager.save_project(project)
+            except Exception as research_exc:
+                logger.warning("Planning external research skipped: %s", research_exc)
+
         plan = DomainSimulationPlanner().plan(
             user_question=prompt,
             document_text=document_text,
@@ -205,7 +227,12 @@ def plan_simulation():
 
         return jsonify({
             "success": True,
-            "data": plan
+            "data": plan,
+            "external_research": {
+                "enabled": bool(research_packet and research_packet.get("enabled")),
+                "source_count": len(research_packet.get("sources", [])) if isinstance(research_packet, dict) else 0,
+                "query_count": len(research_packet.get("queries", [])) if isinstance(research_packet, dict) else 0,
+            }
         })
     except Exception as e:
         logger.error(f"Failed to plan simulation: {str(e)}")
@@ -242,9 +269,13 @@ def generate_structured_agents():
         else:
             domain_plan.setdefault("generation_seed", f"adhoc:{uuid.uuid4().hex[:12]}")
 
+        evidence_summary = data.get("evidence_summary") or ""
+        if not evidence_summary and data.get("project_id"):
+            evidence_summary = ProjectManager.get_extracted_text(data.get("project_id")) or ""
+
         agents = AgentGenerationEngine().generate_agents(
             domain_plan,
-            evidence_summary=data.get("evidence_summary") or "",
+            evidence_summary=evidence_summary,
             use_llm=data.get("use_llm", True) is not False,
         )
         return jsonify({

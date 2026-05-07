@@ -132,6 +132,8 @@ def _split_items(text: str) -> List[str]:
     out = []
     for piece in pieces:
         cleaned = re.sub(r"^[\s\-*•\d.)]+", "", piece)
+        cleaned = re.sub(r"^(?:include|includes|including|considering|with)\s+", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.split(r"\b(?:only if|if supported|when supported)\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
         if ":" in cleaned or "=" in cleaned:
             parts = re.split(r"[:=]", cleaned, maxsplit=1)
             left = parts[0].strip().lower()
@@ -178,8 +180,6 @@ def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
             })
             if len(items) >= 10:
                 break
-        if items:
-            break
     return items or [{
         "name": "primary_outcome",
         "unit": "index",
@@ -314,7 +314,7 @@ def _actor_candidates_from_context(text: str) -> List[str]:
     candidates = []
     source_text = (text or "").replace("U.S.", "US").replace("U.K.", "UK")
     for pattern in [
-        r"(?:considering|using|involving|including|with)\s+([^.;\n]+)",
+        r"(?:considering|using|involving|include|includes|including|with)\s+([^.;\n]+)",
         r"(?:driven by|impacted by|affected by)\s+([^.;\n]+)",
     ]:
         for match in re.finditer(pattern, source_text, flags=re.IGNORECASE):
