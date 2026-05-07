@@ -197,6 +197,7 @@ def generate_report():
 
         structured_state = SimulationStateManager.load(simulation_id)
         validator = NumericValidationService()
+        structured_ready = False
         if not structured_state:
             validation = {
                 "passed": False,
@@ -237,9 +238,10 @@ def generate_report():
                         "For debugging only, send bypass_readiness=true to force legacy report generation."
                     ]
                 }), 409
+            structured_ready = bool(validation.get("passed"))
 
         readiness = _evaluate_report_readiness(state, graph_id)
-        if not readiness["ready"] and not bypass_readiness:
+        if not structured_ready and not readiness["ready"] and not bypass_readiness:
             return jsonify({
                 "success": False,
                 "error": "Report generation blocked because the simulation evidence pipeline is not ready.",

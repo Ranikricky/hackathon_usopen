@@ -3,10 +3,11 @@
 Step2: Zep实体读取与过滤、OASIS模拟准备与运行（全程自动化）
 """
 
+import json
 import os
 import traceback
 import uuid
-from flask import request, jsonify, send_file
+from flask import Response, request, jsonify, send_file
 
 from . import simulation_bp
 from ..config import Config
@@ -18,6 +19,7 @@ from ..services.domain_simulation_planner import DomainSimulationPlanner
 from ..services.agent_generation_engine import AgentGenerationEngine
 from ..services.external_research import ExternalResearchService
 from ..services.numeric_validation import NumericValidationService
+from ..services.structured_simulation_runner import StructuredSimulationRunner
 from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
 from ..models.project import ProjectManager
@@ -29,6 +31,69 @@ logger = get_logger('horizonxl.api.simulation')
 # Interview prompt 优化前缀
 # 添加此前缀可以避免Agent调用工具，直接用文本回复
 INTERVIEW_PROMPT_PREFIX = "结合你的人设、所有的过往记忆与行动，不调用任何工具直接用文本回复我："
+
+
+def _render_discussion_transcript_markdown(state_dict: dict) -> str:
+    """Render stored structured discussion turns as readable dialogue."""
+    plan = state_dict.get("domain_plan") or {}
+    turns = state_dict.get("discussion_transcript") or []
+    pockets = state_dict.get("time_pockets") or []
+    pocket_labels = {
+        pocket.get("pocket_id"): pocket.get("label") or pocket.get("pocket_id")
+        for pocket in pockets
+    }
+    turns_by_pocket = {}
+    for turn in turns:
+        turns_by_pocket.setdefault(turn.get("pocket_id"), []).append(turn)
+
+    lines = [
+        "# Horizon XL Simulation Debate Transcript",
+        "",
+        f"- Simulation ID: `{state_dict.get('simulation_id')}`",
+        f"- Project ID: `{state_dict.get('project_id')}`",
+        f"- Domain: `{plan.get('domain', 'other')}`",
+        f"- Turns: `{len(turns)}`",
+        f"- Time pockets: `{len(pockets)}`",
+        "",
+        "This transcript is rendered from `structured_state.json`. It shows the moderator, research/data turns, agent arguments, challenges, rebuttals, mediated revisions, evidence audit, and quant synthesis.",
+        "",
+    ]
+
+    for pocket in pockets:
+        pocket_id = pocket.get("pocket_id")
+        label = pocket_labels.get(pocket_id) or pocket_id or "Unknown pocket"
+        lines.extend([f"## {label}", ""])
+        pocket_turns = turns_by_pocket.get(pocket_id, [])
+        if not pocket_turns:
+            lines.extend(["No dialogue turns recorded for this pocket.", ""])
+            continue
+        for idx, turn in enumerate(pocket_turns, start=1):
+            speaker = turn.get("speaker_name") or turn.get("speaker_id") or "Unknown speaker"
+            role = turn.get("speaker_role") or turn.get("turn_type") or "turn"
+            turn_type = turn.get("turn_type") or "dialogue"
+            message = " ".join(str(turn.get("message") or "").split())
+            metadata = turn.get("metadata") or {}
+            lines.extend([
+                f"### {idx}. {speaker}",
+                "",
+                f"- Type: `{turn_type}`",
+                f"- Role: `{role}`",
+                "",
+                message or "_No message recorded._",
+                "",
+            ])
+            if turn_type == "mediated_revision" and metadata:
+                lines.extend([
+                    "**Revision metadata**",
+                    "",
+                    f"- Target: `{metadata.get('contested_target', '')}`",
+                    f"- Original: `{metadata.get('original_base', '')}`",
+                    f"- Challenger: `{metadata.get('challenger_base', '')}`",
+                    f"- Provisional: `{metadata.get('provisional_value', '')}`",
+                    f"- Spread: `{metadata.get('spread', '')}`",
+                    "",
+                ])
+    return "\n".join(lines).strip() + "\n"
 
 
 def optimize_interview_prompt(prompt: str) -> str:
@@ -317,6 +382,48 @@ def get_structured_simulation_state(simulation_id: str):
         }), 500
 
 
+@simulation_bp.route('/transcript/<simulation_id>', methods=['GET'])
+def get_structured_simulation_transcript(simulation_id: str):
+    """Return the structured debate transcript as markdown, text, or JSON."""
+    try:
+        state = SimulationStateManager.load(simulation_id)
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": "Structured simulation state not found."
+            }), 404
+
+        state_dict = state.to_dict()
+        output_format = (request.args.get("format") or "markdown").lower()
+        download = request.args.get("download", "false").lower() in {"1", "true", "yes"}
+
+        if output_format == "json":
+            return jsonify({
+                "success": True,
+                "data": {
+                    "simulation_id": simulation_id,
+                    "discussion_transcript": state_dict.get("discussion_transcript") or [],
+                    "time_pockets": state_dict.get("time_pockets") or [],
+                    "debate_impact": (state_dict.get("aggregated_outputs") or {}).get("debate_impact") or {},
+                }
+            })
+
+        markdown = _render_discussion_transcript_markdown(state_dict)
+        mimetype = "text/markdown; charset=utf-8" if output_format in {"md", "markdown"} else "text/plain; charset=utf-8"
+        filename = f"{simulation_id}_debate_transcript.{'md' if 'markdown' in mimetype else 'txt'}"
+        headers = {}
+        if download:
+            headers["Content-Disposition"] = f"attachment; filename={filename}"
+        return Response(markdown, mimetype=mimetype, headers=headers)
+    except Exception as e:
+        logger.error(f"Failed to fetch structured debate transcript: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
 @simulation_bp.route('/validation/<simulation_id>', methods=['GET'])
 def get_simulation_validation(simulation_id: str):
     """Validate structured simulation state and persist the validation result."""
@@ -347,6 +454,113 @@ def get_simulation_validation(simulation_id: str):
         })
     except Exception as e:
         logger.error(f"Failed to validate structured simulation state: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/run-structured', methods=['POST'])
+def run_structured_simulation():
+    """Run the domain-general structured simulation state pipeline."""
+    try:
+        data = request.get_json() or {}
+        project_id = data.get('project_id')
+        simulation_id = data.get('simulation_id')
+        graph_id = data.get('graph_id')
+
+        project = None
+        prompt = (data.get('prompt') or '').strip()
+        document_text = data.get('document_text') or ''
+        if project_id:
+            project = ProjectManager.get_project(project_id)
+            if not project:
+                return jsonify({
+                    "success": False,
+                    "error": t('api.projectNotFound', id=project_id)
+                }), 404
+            prompt = prompt or project.simulation_requirement or ''
+            graph_id = graph_id or project.graph_id
+            document_text = document_text or ProjectManager.get_extracted_text(project_id) or ''
+
+        if not prompt and not data.get('domain_plan'):
+            return jsonify({
+                "success": False,
+                "error": "prompt or domain_plan is required."
+            }), 400
+
+        manager = SimulationManager()
+        legacy_state = manager.get_simulation(simulation_id) if simulation_id else None
+        if simulation_id and not legacy_state:
+            return jsonify({
+                "success": False,
+                "error": t('api.simulationNotFound', id=simulation_id)
+            }), 404
+
+        if not legacy_state:
+            if not project_id:
+                return jsonify({
+                    "success": False,
+                    "error": "project_id is required when creating a structured simulation."
+                }), 400
+            if not graph_id:
+                return jsonify({
+                    "success": False,
+                    "error": t('api.graphNotBuilt')
+                }), 400
+            legacy_state = manager.create_simulation(
+                project_id=project_id,
+                graph_id=graph_id,
+                enable_twitter=False,
+                enable_reddit=False,
+            )
+            simulation_id = legacy_state.simulation_id
+
+        domain_plan = data.get('domain_plan') or DomainSimulationPlanner().plan(
+            user_question=prompt or (project.simulation_requirement if project else ''),
+            document_text=document_text,
+            project_id=legacy_state.project_id,
+        )
+        domain_plan["generation_seed"] = (
+            data.get("generation_seed")
+            or domain_plan.get("generation_seed")
+            or f"{legacy_state.project_id}:{simulation_id}:{uuid.uuid4().hex[:8]}"
+        )
+
+        evidence_text = data.get("evidence_text") or document_text or prompt
+        agents = data.get('agents') or AgentGenerationEngine().generate_agents(
+            domain_plan,
+            evidence_summary=evidence_text[:12000],
+            use_llm=data.get("use_llm_agents", True) is not False,
+        )
+
+        structured_state = StructuredSimulationRunner().run(
+            simulation_id=simulation_id,
+            project_id=legacy_state.project_id,
+            domain_plan=domain_plan,
+            agents=agents,
+            evidence_text=evidence_text,
+        )
+
+        validation = structured_state.validation or NumericValidationService().validate(structured_state.to_dict())
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "project_id": legacy_state.project_id,
+                "graph_id": legacy_state.graph_id,
+                "domain": domain_plan.get("domain"),
+                "agent_count": len(structured_state.agents),
+                "time_pocket_count": len(structured_state.time_pockets),
+                "target_variable_count": len(domain_plan.get("target_variables") or []),
+                "agent_output_count": len(structured_state.agent_outputs),
+                "validation": validation,
+                "structured_state_path": "structured_state.json",
+            }
+        })
+    except Exception as e:
+        logger.error(f"Failed to run structured simulation: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),

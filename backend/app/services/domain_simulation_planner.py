@@ -18,11 +18,45 @@ from ..utils.logger import get_logger
 logger = get_logger("horizonxl.services.domain_simulation_planner")
 
 
-SCENARIOS = {
+SCENARIO_FLAGS = {
     "base_case": True,
     "upside_case": True,
     "downside_case": True,
     "tail_case": True,
+}
+
+
+DEFAULT_SCENARIO_PATHS = [
+    {
+        "id": "base_case",
+        "name": "Base case",
+        "description": "Most likely path given the evidence currently available.",
+        "required": True,
+    },
+    {
+        "id": "upside_case",
+        "name": "Upside case",
+        "description": "Path where favorable drivers dominate relative to the base case.",
+        "required": True,
+    },
+    {
+        "id": "downside_case",
+        "name": "Downside case",
+        "description": "Path where adverse drivers dominate relative to the base case.",
+        "required": True,
+    },
+    {
+        "id": "tail_case",
+        "name": "Tail risk case",
+        "description": "Low-probability, high-impact path that stresses the assumptions.",
+        "required": True,
+    },
+]
+
+
+SCENARIOS = {
+    **SCENARIO_FLAGS,
+    "scenarios": DEFAULT_SCENARIO_PATHS,
 }
 
 
@@ -96,6 +130,7 @@ ACTOR_HINT_WORDS = {
     "developer", "executive", "expert", "firm", "government", "group",
     "household", "institution", "investor", "journalist", "leader", "maker",
     "media", "mediator", "ministry", "observer", "official", "operator",
+    "negotiator",
     "organization", "participant", "party", "people", "platform", "platforms",
     "pollster", "producer", "provider", "providers", "owner", "owners",
     "landlord", "landlords", "influencer", "influencers", "bank", "banks",
@@ -146,9 +181,117 @@ def _split_items(text: str) -> List[str]:
     return out
 
 
+def _extract_numbered_items_after_heading(
+    text: str,
+    heading_pattern: str,
+    stop_pattern: str,
+    limit: int = 80,
+) -> List[str]:
+    """Extract explicitly enumerated prompt items without treating prose as actors."""
+    source = text or ""
+    match = re.search(heading_pattern, source, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return []
+    start = match.end()
+    tail = source[start:]
+    stop = re.search(stop_pattern, tail, flags=re.IGNORECASE | re.DOTALL)
+    block = tail[:stop.start()] if stop else tail
+    items: List[str] = []
+    for line in block.splitlines():
+        cleaned = line.strip()
+        numbered = re.match(r"^(?:[-*•]|\d{1,3}[.)])\s*(.+?)\s*$", cleaned)
+        if not numbered:
+            continue
+        value = re.sub(r"\s+", " ", numbered.group(1)).strip(" .,:;-")
+        if 2 <= len(value) <= 240:
+            items.append(value)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _extract_explicit_agent_items(text: str) -> List[str]:
+    return _extract_numbered_items_after_heading(
+        text,
+        r"(?:create|generate|use|define)\s*(?:\d{1,3}\s+)?(?:[a-z ]+)?agents?\s*(?:as previously defined)?\s*[:\n]",
+        r"(?:\n\s*(?:For every agent|Target Variables|Forecast these|Run the simulation|Time[- ]?Pocket|Scenario Paths|Run four scenarios|Required output|Rules)\b|\n\s*\d+\.\s*(?:Target Variables|Time[- ]?Pocket|Scenario Paths|Required output|Rules)\b)",
+        limit=80,
+    )
+
+
+def _extract_explicit_target_items(text: str) -> List[str]:
+    bullet_targets = []
+    collecting = False
+    for line in (text or "").splitlines():
+        if re.search(r"(?:the simulation must forecast|must forecast)\s*:\s*$", line, flags=re.IGNORECASE):
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        match = re.match(r"^\s*[-*•]\s*(.+?)\s*$", line)
+        if match:
+            bullet_targets.append(match.group(1).strip(" .,:;-"))
+            continue
+        if bullet_targets and line.strip():
+            break
+
+    items = _extract_numbered_items_after_heading(
+        text,
+        r"(?:forecast these numeric variables|target variables|required numeric variables)\s*[:\n]",
+        r"(?:\n\s*(?:Create\s+\d{1,3}\s+.*agents|For every agent|Run the simulation|Time[- ]?Pocket|Scenario Paths|Run four scenarios|Required output|Rules)\b|\n\s*\d+\.\s*(?:Agent Architecture|Time[- ]?Pocket|Scenario Paths|Required output|Rules)\b)",
+        limit=100,
+    )
+    merged = []
+    seen = set()
+    for item in bullet_targets + items:
+        key = item.lower()
+        if key not in seen:
+            merged.append(item)
+            seen.add(key)
+    return merged
+
+
+def _extract_time_pocket_items(text: str) -> List[str]:
+    return _extract_numbered_items_after_heading(
+        text,
+        r"(?:run the simulation in sequential time pockets|time[- ]?pocket simulation plan|simulate sequentially|time[- ]?pockets?)\s*[:\n]",
+        r"(?:\n\s*(?:Run four scenarios|Scenario Paths|Required output|Rules)\b|\n\s*\d+\.\s*(?:Scenario Paths|Required output|Rules)\b|$)",
+        limit=80,
+    )
+
+
+def _extract_scenario_items(text: str) -> List[Dict[str, Any]]:
+    raw_items = _extract_numbered_items_after_heading(
+        text,
+        r"(?:run four scenarios|scenario paths?|scenario structure|run scenarios)\s*[:\n]",
+        r"(?:\n\s*(?:Required output|Rules|Final Horizon|Data Tables)\b|\n\s*\d+\.\s*(?:Required output|Rules|Final Horizon|Data Tables)\b|$)",
+        limit=40,
+    )
+    scenarios: List[Dict[str, Any]] = []
+    seen = set()
+    for idx, item in enumerate(raw_items, start=1):
+        name, description = item, item
+        if ":" in item:
+            left, right = item.split(":", 1)
+            name = left.strip(" .:-")
+            description = right.strip(" .:-") or item
+        scenario_id = _snake(name)
+        if not scenario_id or scenario_id in seen:
+            scenario_id = f"scenario_{idx:02d}"
+        seen.add(scenario_id)
+        scenarios.append({
+            "id": scenario_id,
+            "name": name,
+            "description": description,
+            "required": True,
+        })
+    return scenarios
+
+
 def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
     source_text = (text or "").replace("U.S.", "US").replace("U.K.", "UK")
     sections = []
+    explicit_targets = _extract_explicit_target_items(source_text)
     target_section = re.search(
         r"target variables?\s*(?:[:=-]|\n)(.*?)(?:agent|scenario|time[- ]?pocket|final|$)",
         source_text,
@@ -160,6 +303,23 @@ def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
         sections.append(match.group(1))
     items = []
     seen = set()
+    for raw in explicit_targets:
+        for target in _expand_target_item(raw):
+            name = target["name"]
+            if name in seen or name in {"the", "future", "scenario"}:
+                continue
+            seen.add(name)
+            items.append(target)
+
+    max_targets = 40 if len(explicit_targets) > 12 else 18
+    if explicit_targets:
+        return items or [{
+            "name": "primary_outcome",
+            "unit": "index",
+            "required": True,
+            "description": "Primary simulated outcome requested by the user.",
+        }]
+
     for section in sections:
         cleaned_section = _clean_target_section(section)
         for raw in _split_items(cleaned_section):
@@ -178,13 +338,81 @@ def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
                 "required": True,
                 "description": f"Prompt-derived target variable: {raw}.",
             })
-            if len(items) >= 10:
+            if len(items) >= max_targets:
                 break
     return items or [{
         "name": "primary_outcome",
         "unit": "index",
         "required": True,
         "description": "Primary simulated outcome requested by the user.",
+    }]
+
+
+def _expand_target_item(raw: str) -> List[Dict[str, Any]]:
+    """Split compact prompt targets into atomic numeric variables.
+
+    This stays domain-generic: it looks for reusable output concepts such as
+    share, seats, turnout, probability, index, and count rather than hardcoded
+    parties, countries, sectors, or topics.
+    """
+    text = re.sub(r"\s+", " ", raw or "").strip(" .,:;-")
+    lowered = text.lower()
+    if not text:
+        return []
+
+    target_terms = [
+        ("vote_share", "percent", r"\bvote\s+share\b"),
+        ("seat_share", "percent", r"\bseat\s+share\b"),
+        ("seats", "count", r"\bseats?\b"),
+        ("turnout", "percent", r"\bturnout\b"),
+        ("probability", "percent", r"\bprobability\b|\bchance\b|\bwin\s+probability\b"),
+        ("index", "index", r"\bindex\b"),
+        ("rate", "percent", r"\brate\b"),
+        ("share", "percent", r"\bshare\b"),
+        ("count", "count", r"\bcount\b|\bnumber\b"),
+    ]
+    matches = [(suffix, unit) for suffix, unit, pattern in target_terms if re.search(pattern, lowered)]
+    match_suffixes = {suffix for suffix, _ in matches}
+    if "vote_share" in match_suffixes or "seat_share" in match_suffixes:
+        matches = [(suffix, unit) for suffix, unit in matches if suffix != "share"]
+
+    connector_split = re.split(r"\s+(?:and|&|/)\s+", text, flags=re.IGNORECASE)
+    if len(connector_split) > 1 and any(re.search(r"\bturnout\b|\bindex\b", part, flags=re.IGNORECASE) for part in connector_split):
+        expanded = []
+        for part in connector_split:
+            part_clean = part.strip(" .,:;-")
+            if not part_clean:
+                continue
+            if not any(re.search(pattern, part_clean, flags=re.IGNORECASE) for _, _, pattern in target_terms):
+                inherited = "turnout" if "turnout" in lowered else ("index" if "index" in lowered else "")
+                part_clean = f"{part_clean} {inherited}".strip()
+            expanded.extend(_expand_target_item(part_clean))
+        return expanded
+
+    if len(matches) >= 2:
+        actor_phrase = text
+        for suffix, _, pattern in target_terms:
+            actor_phrase = re.sub(pattern, " ", actor_phrase, flags=re.IGNORECASE)
+        actor_phrase = re.sub(r"\b(?:and|by|of|for|overall|statewide|regional)\b", " ", actor_phrase, flags=re.IGNORECASE)
+        actor_phrase = re.sub(r"\s+", " ", actor_phrase).strip(" .,:;-")
+        expanded = []
+        for suffix, unit in matches:
+            prefix = _snake(actor_phrase) if actor_phrase else "statewide"
+            name = f"{prefix}_{suffix}" if prefix and suffix not in prefix else prefix or suffix
+            expanded.append({
+                "name": _snake(name),
+                "unit": unit,
+                "required": True,
+                "description": f"Prompt-required atomic target from '{text}': {suffix.replace('_', ' ')}.",
+            })
+        return expanded
+
+    name = _snake(text)
+    return [{
+        "name": name,
+        "unit": _infer_unit(lowered),
+        "required": True,
+        "description": f"Prompt-required target variable: {text}.",
     }]
 
 
@@ -220,6 +448,7 @@ def _infer_unit(text: str) -> str:
 
 
 def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    explicit_agents = _extract_explicit_agent_items(text)
     explicit_sections = []
     for pattern in [
         r"agent architecture.*?(?:target variables|time[- ]?pocket|scenario paths|data tables|final|$)",
@@ -230,14 +459,16 @@ def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]])
         if match:
             explicit_sections.append(match.group(0))
 
-    candidates = []
-    for section in explicit_sections:
-        candidates.extend(_split_items(section))
+    candidates = list(explicit_agents)
+    if not candidates:
+        for section in explicit_sections:
+            candidates.extend(_split_items(section))
     if not candidates:
         candidates.extend(_actor_candidates_from_context(text))
 
     archetypes = []
     seen = set()
+    max_archetypes = max(12, min(40, len(candidates) if explicit_agents else 20))
     for raw in candidates:
         if not _looks_actorish(raw):
             continue
@@ -252,10 +483,12 @@ def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]])
             "likely_bias": "May overweight its own information access, incentives, or lived context.",
             "population_share": None,
             "subtypes": _generic_subtypes(name),
-            "numeric_output_required": True,
+            "numeric_output_required": _should_output_numbers(name),
         })
-        if len(archetypes) >= 12:
+        if len(archetypes) >= max_archetypes:
             break
+
+    archetypes = _ensure_participant_cohorts(archetypes, text)
 
     if archetypes:
         return archetypes
@@ -269,7 +502,7 @@ def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]])
             "likely_bias": "May defend prior decisions or understate implementation risk.",
             "population_share": 0.18,
             "subtypes": ["formal authority", "operational decision maker"],
-            "numeric_output_required": True,
+            "numeric_output_required": False,
         },
         {
             "name": "Affected Participant Groups",
@@ -278,7 +511,7 @@ def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]])
             "likely_bias": "May reflect local intensity more than broad averages.",
             "population_share": 0.34,
             "subtypes": ["high-exposure participant", "low-exposure participant", "skeptical participant", "swing participant"],
-            "numeric_output_required": True,
+            "numeric_output_required": False,
         },
         {
             "name": "Resource Controllers",
@@ -287,7 +520,7 @@ def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]])
             "likely_bias": "May hide fragility or overstate control.",
             "population_share": 0.16,
             "subtypes": ["capacity holder", "funding holder"],
-            "numeric_output_required": True,
+            "numeric_output_required": False,
         },
         {
             "name": "Independent Analysts",
@@ -305,9 +538,103 @@ def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]])
             "likely_bias": "May overweight salient or recent stories.",
             "population_share": 0.16,
             "subtypes": ["mainstream narrator", "local signal broker"],
-            "numeric_output_required": True,
+            "numeric_output_required": False,
         },
     ]
+
+
+def _ensure_participant_cohorts(archetypes: List[Dict[str, Any]], text: str) -> List[Dict[str, Any]]:
+    """Derive actual affected cohorts from prompt-derived observer/analyst roles."""
+    existing = {str(item.get("name", "")).lower() for item in archetypes}
+    additions = []
+
+    for archetype in archetypes:
+        source_name = str(archetype.get("name") or "").strip()
+        cohort_name = _cohort_from_observer_role(source_name)
+        if not cohort_name or cohort_name.lower() in existing:
+            continue
+        additions.append({
+            "name": cohort_name,
+            "causal_role": (
+                f"Represents the actual affected people implied by `{source_name}`. "
+                "Their aggregate choices, lived reactions, adoption, refusal, turnout, demand, or compliance can move the outcome."
+            ),
+            "information_advantage": (
+                "Ground-level lived experience, local incentives, social pressure, material constraints, "
+                "and behavioral response not visible from analyst or institutional roles alone."
+            ),
+            "likely_bias": "May overweight local experience, immediate material benefit, identity pressure, or recent salient events.",
+            "population_share": 0.0,
+            "subtypes": _generic_subtypes(cohort_name) or [
+                "high-exposure participant",
+                "low-exposure participant",
+                "swing participant",
+                "skeptical participant",
+            ],
+            "numeric_output_required": False,
+        })
+        existing.add(cohort_name.lower())
+
+    if not additions:
+        return archetypes
+
+    return archetypes + additions[:12]
+
+
+def _cohort_from_observer_role(name: str) -> Optional[str]:
+    """Turn 'X analyst/observer' into 'X cohort' when X is not just an institution."""
+    if not name:
+        return None
+    lowered = name.lower()
+    excluded_role_terms = [
+        "strategist", "negotiator", "journalist", "media", "pollster",
+        "scientist", "watchdog", "auditor", "business", "industry",
+        "official", "government", "bank", "regulator", "company",
+        "organization", "institution", "party", "moderator", "mediator",
+        "research", "data retrieval", "synthesizer",
+    ]
+    if any(term in lowered for term in excluded_role_terms):
+        return None
+
+    base = re.sub(
+        r"\b(?:analyst|observer|representative|advocate|interpreter|tracker|voice|proxy|profile|persona)\b",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
+    base = re.sub(r"\s+", " ", base).strip(" -_/")
+    if not base or base.lower() == lowered:
+        return None
+    if len(base.split()) > 5:
+        return None
+    if base.lower() in {"primary", "independent", "external"}:
+        return None
+    return f"{base} Cohort"
+
+
+def _should_output_numbers(name: str) -> bool:
+    """Only numeric-capable roles should own forecast paths."""
+    lowered = (name or "").lower()
+    non_numeric_terms = [
+        "voter", "consumer", "worker", "household", "beneficiary", "community",
+        "cohort", "common", "public", "people", "rural poor", "urban middle",
+        "youth", "student", "patient", "citizen", "resident", "observer",
+        "booth-level worker", "field worker", "minority", "women", "middle-class",
+        "middle class", "rural", "urban", "poor", "grassroots", "booth",
+        "journalist", "media", "narrative", "watchdog", "governance",
+    ]
+    numeric_terms = [
+        "quant", "data", "pollster", "scientist", "economist", "researcher",
+        "forecaster", "model", "statistic", "auditor", "synthesizer", "retrieval",
+        "numeric", "survey", "polling", "measurement",
+    ]
+    if any(term in lowered for term in non_numeric_terms):
+        return False
+    if any(term in lowered for term in ["strategist", "negotiator", "campaign", "party", "executive", "operator"]):
+        return False
+    if any(term in lowered for term in numeric_terms):
+        return True
+    return True
 
 
 def _actor_candidates_from_context(text: str) -> List[str]:
@@ -523,10 +850,14 @@ Rules:
             "forecast_horizon": self._normalize_horizon(plan.get("forecast_horizon") or self._infer_horizon(combined_text)),
             "required_agent_archetypes": archetypes,
             "state_variables": self._normalize_state_variables(plan.get("state_variables") or self._infer_state_variables(combined_text, targets)),
-            "scenario_structure": self._normalize_scenarios(plan.get("scenario_structure")),
+            "scenario_structure": self._normalize_scenarios(plan.get("scenario_structure"), combined_text),
             "required_outputs": self._ensure_list(plan.get("required_outputs"), DEFAULT_REQUIRED_OUTPUTS),
             "validation_requirements": self._ensure_list(plan.get("validation_requirements"), DEFAULT_VALIDATION_REQUIREMENTS),
         }
+        normalized["time_pockets"] = self._normalize_time_pockets(
+            plan.get("time_pockets") or _extract_time_pocket_items(combined_text),
+            normalized["forecast_horizon"],
+        )
         normalized["agent_population"] = self._normalize_agent_population(
             plan.get("agent_population"),
             normalized["required_agent_archetypes"],
@@ -607,7 +938,7 @@ Rules:
                 continue
             merged.append(item)
             seen.add(name)
-            if len(merged) >= 12:
+            if len(merged) >= 40:
                 break
         return merged or extracted
 
@@ -621,6 +952,37 @@ Rules:
             "end": str(horizon.get("end") or "auto"),
             "granularity": granularity,
         }
+
+    def _normalize_time_pockets(self, value: Any, horizon: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw_items: List[Any] = value if isinstance(value, list) else []
+        pockets: List[Dict[str, Any]] = []
+        for idx, item in enumerate(raw_items, start=1):
+            if isinstance(item, dict):
+                label = str(item.get("label") or item.get("name") or f"Pocket {idx}").strip()
+                start = str(item.get("start") or "auto")
+                end = str(item.get("end") or "auto")
+                events = item.get("events") if isinstance(item.get("events"), list) else []
+            else:
+                label = re.sub(r"\s+", " ", str(item)).strip(" .,:;-") or f"Pocket {idx}"
+                start = "auto"
+                end = "auto"
+                events = []
+            pockets.append({
+                "pocket_id": f"pocket_{idx:03d}",
+                "label": label,
+                "start": start,
+                "end": end,
+                "events": events,
+            })
+        if pockets:
+            return pockets[:80]
+        return [{
+            "pocket_id": "pocket_001",
+            "label": f"{horizon.get('granularity', 'event_triggered')} simulation pocket",
+            "start": horizon.get("start") or "auto",
+            "end": horizon.get("end") or "auto",
+            "events": [],
+        }]
 
     def _normalize_agents(self, values: Any) -> List[Dict[str, Any]]:
         out = []
@@ -636,7 +998,11 @@ Rules:
                 "population_share": item.get("population_share"),
                 "instance_count": item.get("instance_count"),
                 "subtypes": self._ensure_list(item.get("subtypes"), _generic_subtypes(name)),
-                "numeric_output_required": bool(item.get("numeric_output_required", True)),
+                "numeric_output_required": bool(
+                    item["numeric_output_required"]
+                    if "numeric_output_required" in item
+                    else _should_output_numbers(name)
+                ),
             })
         return out or _extract_agent_archetypes("", [{"name": "primary_outcome"}])
 
@@ -653,7 +1019,7 @@ Rules:
                 continue
             merged.append(item)
             seen.add(name)
-            if len(merged) >= 20:
+            if len(merged) >= 40:
                 break
         return merged or extracted
 
@@ -670,9 +1036,57 @@ Rules:
             })
         return out or [{"name": "uncertainty_pressure", "unit": "index", "directional_interpretation": "Higher means more uncertainty.", "required": True}]
 
-    def _normalize_scenarios(self, value: Any) -> Dict[str, bool]:
+    def _normalize_scenarios(self, value: Any, combined_text: str = "") -> Dict[str, Any]:
         scenario = value if isinstance(value, dict) else {}
-        return {key: bool(scenario.get(key, default)) for key, default in SCENARIOS.items()}
+        extracted = _extract_scenario_items(combined_text)
+        supplied = scenario.get("scenarios")
+        scenario_paths: List[Dict[str, Any]] = []
+
+        if isinstance(supplied, list):
+            for idx, item in enumerate(supplied, start=1):
+                if isinstance(item, dict):
+                    name = str(item.get("name") or item.get("id") or f"Scenario {idx}").strip()
+                    description = str(item.get("description") or item.get("rationale") or name).strip()
+                    scenario_id = _snake(str(item.get("id") or name))
+                else:
+                    name = str(item).strip()
+                    description = name
+                    scenario_id = _snake(name)
+                if not name:
+                    continue
+                scenario_paths.append({
+                    "id": scenario_id or f"scenario_{idx:02d}",
+                    "name": name,
+                    "description": description,
+                    "required": True if not isinstance(item, dict) else bool(item.get("required", True)),
+                })
+
+        if extracted:
+            scenario_paths = extracted
+        if not scenario_paths:
+            scenario_paths = deepcopy(DEFAULT_SCENARIO_PATHS)
+
+        flags = {key: bool(scenario.get(key, default)) for key, default in SCENARIO_FLAGS.items()}
+        flags["scenarios"] = self._dedupe_scenario_paths(scenario_paths)
+        return flags
+
+    def _dedupe_scenario_paths(self, scenarios: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out = []
+        seen = set()
+        for idx, item in enumerate(scenarios, start=1):
+            scenario_id = _snake(str(item.get("id") or item.get("name") or f"scenario_{idx:02d}"))
+            if scenario_id in seen:
+                scenario_id = f"{scenario_id}_{idx:02d}"
+            seen.add(scenario_id)
+            out.append({
+                "id": scenario_id,
+                "name": str(item.get("name") or scenario_id).strip(),
+                "description": str(item.get("description") or item.get("name") or scenario_id).strip(),
+                "required": bool(item.get("required", True)),
+            })
+            if len(out) >= 12:
+                break
+        return out
 
     def _ensure_list(self, value: Any, fallback: List[str]) -> List[str]:
         if not isinstance(value, list) or not value:
@@ -753,17 +1167,14 @@ Rules:
             total = sum(float(value) for value in explicit) or 1.0
             return [float(value) / total for value in explicit]
         weights = []
-        lowered = (text or "").lower()
         for item in archetypes:
             name = str(item.get("name", "")).lower()
+            causal_role = str(item.get("causal_role", "")).lower()
             weight = 1.0
-            if any(term in name for term in ["people", "participant", "consumer", "voter", "worker", "citizen", "household", "community", "user"]):
-                weight = 2.6
+            if "cohort" in name or "affected people" in causal_role:
+                weight = 3.8
             if any(term in name for term in ["data", "analyst", "research", "expert", "scientist"]):
                 weight = max(weight, 1.3)
-            if any(term in lowered for term in ["common people", "public", "mass", "participation", "adoption", "demand"]):
-                if any(term in name for term in ["people", "participant", "consumer", "voter", "worker", "citizen", "household", "community", "user"]):
-                    weight *= 1.7
             weights.append(weight)
         total = sum(weights) or 1.0
         return [weight / total for weight in weights]

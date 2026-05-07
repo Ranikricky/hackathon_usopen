@@ -49,11 +49,14 @@ CONTROL_ENTITY_TYPES = [
 
 
 CONTROL_EDGE_TYPES: List[Tuple[str, str, str, str]] = [
-    ("MODERATES_DISCUSSION", "Keeps simulation rounds focused on the prompt.", "SimulationModerator", "Organization"),
+    ("MODERATES_DISCUSSION", "Keeps simulation rounds focused on the prompt.", "SimulationModerator", "NegotiationMediator"),
     ("FINDS_EXTERNAL_EVIDENCE", "Finds source pointers for the next debate pocket.", "ExternalResearchScout", "EvidenceAuditor"),
     ("AUDITS_EVIDENCE", "Checks whether claims are supported and timely.", "EvidenceAuditor", "QuantitativeSynthesizer"),
     ("SYNTHESIZES_FORECASTS", "Converts validated signals into numeric scenarios.", "QuantitativeSynthesizer", "SimulationModerator"),
     ("MEDIATES_DISAGREEMENT", "Organizes contested assumptions and bargaining positions.", "NegotiationMediator", "SimulationModerator"),
+    ("CHALLENGES_ASSUMPTION", "Challenges weak causal or numeric assumptions.", "EvidenceAuditor", "SimulationModerator"),
+    ("RETRIEVES_NUMERIC_EVIDENCE", "Retrieves numbers for quantitative synthesis.", "ExternalResearchScout", "QuantitativeSynthesizer"),
+    ("VALIDATES_NUMERIC_CLAIMS", "Checks units, dates, and forecast plausibility.", "EvidenceAuditor", "QuantitativeSynthesizer"),
 ]
 
 
@@ -390,7 +393,7 @@ def _relationship_edges_for_agents(agents: List[Tuple[str, str]]) -> List[Tuple[
     """Create role-aware relationships from explicit/context-derived agents.
 
     This stays domain-general: it uses role words from the prompt-derived agent
-    names instead of any hardcoded election, macro, oil, or Bengal roster.
+    names instead of any pre-baked domain roster.
     """
     names = [_to_pascal_case(name) for name, _ in agents]
     roles = {name: _agent_role(name) for name in names}
@@ -473,8 +476,13 @@ def _ensure_control_entities(entity_types: List[Dict[str, Any]], max_count: int)
         domain_entities.append(entity)
 
     control_count = min(len(CONTROL_ENTITY_TYPES), max_count)
-    selected = domain_entities[: max(0, max_count - control_count)]
+    generic_reserve = min(len(generic_names), max(0, max_count - control_count))
+    selected = domain_entities[: max(0, max_count - control_count - generic_reserve)]
     selected.extend(_entity(item["name"], item["description"], item.get("examples")) for item in CONTROL_ENTITY_TYPES[:control_count])
+    if len(selected) < max_count:
+        selected.append(_entity("Person", "Any individual person not fitting another specific type.", ["ordinary participant"]))
+    if len(selected) < max_count:
+        selected.append(_entity("Organization", "Any organization not fitting another specific type.", ["community group"]))
     return selected[:max_count]
 
 
@@ -810,11 +818,18 @@ For repeated prompts, vary secondary observers and personas while preserving cor
         deduped_edges = []
         for edge in result["edge_types"]:
             name = edge.get("name", "")
-            targets = tuple(
-                (str(st.get("source", "")), str(st.get("target", "")))
-                for st in edge.get("source_targets", []) or []
-                if isinstance(st, dict)
-            )
+            valid_targets = []
+            for st in edge.get("source_targets", []) or []:
+                if not isinstance(st, dict):
+                    continue
+                source = _to_pascal_case(str(st.get("source", "")))
+                target = _to_pascal_case(str(st.get("target", "")))
+                if source in entity_names and target in entity_names:
+                    valid_targets.append({"source": source, "target": target})
+            if not valid_targets:
+                continue
+            edge["source_targets"] = valid_targets
+            targets = tuple((st["source"], st["target"]) for st in valid_targets)
             key = (name, targets)
             if name and key not in seen_edges:
                 seen_edges.add(key)

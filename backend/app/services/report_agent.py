@@ -33,6 +33,7 @@ from .external_research import ExternalResearchService
 from .simulation_manager import SimulationManager
 from .simulation_runner import SimulationRunner
 from .numeric_validation import NumericValidationService
+from .output_adapters.report_adapter import StructuredReportAdapter
 from ..models.simulation_state import SimulationStateManager
 
 logger = get_logger('horizonxl.report_agent')
@@ -1126,7 +1127,19 @@ class ReportAgent:
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
         
-        self.llm = llm_client or LLMClient()
+        if llm_client is not None:
+            self.llm = llm_client
+        else:
+            try:
+                self.llm = LLMClient()
+            except Exception:
+                if SimulationStateManager.exists(simulation_id):
+                    logger.warning(
+                        "LLM client unavailable; structured report path will run from validated simulation state."
+                    )
+                    self.llm = None
+                else:
+                    raise
         self.zep_tools = zep_tools or ZepToolsService()
         
         # 工具定义
@@ -2141,6 +2154,30 @@ class ReportAgent:
                     )
                     ReportManager.save_report(report)
                     return report
+
+                structured_output = StructuredReportAdapter().render(structured_state.to_dict())
+                report.status = ReportStatus.COMPLETED
+                report.completed_at = datetime.now().isoformat()
+                report.outline = ReportOutline(
+                    title=structured_output["title"],
+                    summary=structured_output["summary"],
+                    sections=[
+                        ReportSection(title=section["title"], content=section["content"])
+                        for section in structured_output["sections"]
+                    ],
+                )
+                report.markdown_content = structured_output["markdown"]
+                ReportManager.save_outline(report_id, report.outline)
+                ReportManager.save_full_report(report_id, report.markdown_content)
+                ReportManager.update_progress(
+                    report_id,
+                    "completed",
+                    100,
+                    "Structured report generated from validated simulation state",
+                    completed_sections=[section["title"] for section in structured_output["sections"]]
+                )
+                ReportManager.save_report(report)
+                return report
             
             # 初始化日志记录器（结构化日志 agent_log.jsonl）
             self.report_logger = ReportLogger(report_id)
@@ -3006,6 +3043,13 @@ class ReportManager:
                 f.write(report.markdown_content)
         
         logger.info(t('report.reportSaved', reportId=report.report_id))
+
+    @classmethod
+    def save_full_report(cls, report_id: str, markdown_content: str) -> None:
+        """Save the complete Markdown report body."""
+        cls._ensure_report_folder(report_id)
+        with open(cls._get_report_markdown_path(report_id), 'w', encoding='utf-8') as f:
+            f.write(markdown_content or "")
     
     @classmethod
     def get_report(cls, report_id: str) -> Optional[Report]:

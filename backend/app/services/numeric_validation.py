@@ -5,10 +5,11 @@ Reports and other polished outputs should only run after this validator confirms
 that the simulation state contains enough numeric, agent-specific evidence.
 """
 
+import re
 from typing import Any, Dict, List, Set, Tuple
 
 
-SCENARIO_FLAGS = {
+FALLBACK_SCENARIO_FLAGS = {
     "base_case": "base",
     "upside_case": "upside",
     "downside_case": "downside",
@@ -93,10 +94,7 @@ class NumericValidationService:
         for target_name in sorted(required_target_names - variables_with_forecasts):
             missing_variables.append(target_name)
 
-        required_scenarios = {
-            scenario for flag, scenario in SCENARIO_FLAGS.items()
-            if (domain_plan.get("scenario_structure") or {}).get(flag, True)
-        }
+        required_scenarios = self._required_scenarios(domain_plan)
         available_scenarios = {
             scenario for scenario, values in scenario_outputs.items()
             if values
@@ -122,6 +120,22 @@ class NumericValidationService:
             errors.append("Some agent forecasts are missing confidence scores.")
         if total_points and unit_count < total_points:
             errors.append("Some forecast points are missing units.")
+
+        invalid_numeric_roles = self._invalid_numeric_role_agents(agents)
+        if invalid_numeric_roles:
+            errors.append(
+                "Non-numeric participant roles were assigned forecast ownership: "
+                + ", ".join(invalid_numeric_roles[:10])
+            )
+
+        constrained_errors, constrained_warnings = self._validate_constrained_outputs(state)
+        errors.extend(constrained_errors)
+        warnings.extend(constrained_warnings)
+
+        discussion = state.get("discussion_transcript") or []
+        debate_impact = (aggregated_outputs.get("debate_impact") or {}) if isinstance(aggregated_outputs, dict) else {}
+        if discussion and int(debate_impact.get("revision_count") or 0) == 0:
+            errors.append("Debate transcript exists, but no mediated revision changed the structured forecast state.")
 
         if time_pockets and total_points == 0:
             missing_dates.extend([
@@ -156,6 +170,114 @@ class NumericValidationService:
             "numeric_quality_score": quality_score,
         }
 
+    def _invalid_numeric_role_agents(self, agents: List[Dict[str, Any]]) -> List[str]:
+        invalid_terms = [
+            "voter", "beneficiary", "consumer", "worker", "household", "community",
+            "cohort", "citizen", "resident", "observer", "journalist", "media",
+            "watchdog", "governance", "strategist", "campaign", "negotiator",
+            "rural", "urban", "youth", "minority", "women", "booth",
+        ]
+        allowed_terms = [
+            "quant", "data", "pollster", "scientist", "economist", "research",
+            "forecaster", "model", "statistic", "auditor", "synthesizer", "retrieval",
+        ]
+        invalid = []
+        for agent in agents:
+            caps = agent.get("numeric_capabilities") or {}
+            if not caps.get("must_output_numbers", True):
+                continue
+            role_text = " ".join([
+                str(agent.get("name") or ""),
+                str(agent.get("role") or ""),
+                str(agent.get("causal_role") or ""),
+            ]).lower()
+            if any(term in role_text for term in allowed_terms):
+                continue
+            if any(term in role_text for term in invalid_terms):
+                invalid.append(str(agent.get("name") or agent.get("agent_id") or "unknown_agent"))
+        return invalid
+
+    def _validate_constrained_outputs(self, state: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+        errors: List[str] = []
+        warnings: List[str] = []
+        domain_plan = state.get("domain_plan") or {}
+        scenario_outputs = state.get("scenario_outputs") or {}
+        aggregated = state.get("aggregated_outputs") or {}
+        target_names = [
+            str(target.get("name") or "")
+            for target in domain_plan.get("target_variables", []) or []
+            if isinstance(target, dict)
+        ]
+        vote_targets = [target for target in target_names if self._is_composition_target(target, "_vote_share")]
+        seat_targets = [target for target in target_names if self._is_composition_target(target, "_seats")]
+        if len(vote_targets) >= 2:
+            vote_error = self._validate_total_by_date(scenario_outputs, vote_targets, 100.0, tolerance=2.0, label="vote share")
+            if vote_error:
+                errors.append(vote_error)
+        if len(seat_targets) >= 2:
+            total = self._extract_total_count("\n".join([
+                str(domain_plan.get("user_question") or ""),
+                str(domain_plan.get("source_summary") or ""),
+            ]))
+            final_outcome = aggregated.get("final_outcome") if isinstance(aggregated, dict) else {}
+            if total:
+                seat_error = self._validate_total_by_date(scenario_outputs, seat_targets, total, tolerance=1.0, label="seat")
+                if seat_error:
+                    errors.append(seat_error)
+            if not final_outcome or not final_outcome.get("projected_winner"):
+                errors.append("Seat forecast exists, but final projected winner/majority status is missing.")
+        if len(vote_targets) == 1:
+            warnings.append("Only one vote-share target is present; composition cannot be checked against 100%.")
+        return errors, warnings
+
+    def _is_composition_target(self, name: str, suffix: str) -> bool:
+        if not name.endswith(suffix):
+            return False
+        label = name[: -len(suffix)]
+        blocked = ["statewide", "overall", "regional", "crosses", "threshold", "probability", "scenario"]
+        return bool(label) and not any(term in label for term in blocked)
+
+    def _validate_total_by_date(
+        self,
+        scenario_outputs: Dict[str, Any],
+        target_names: List[str],
+        expected: float,
+        tolerance: float,
+        label: str,
+    ) -> str:
+        for scenario, values in (scenario_outputs or {}).items():
+            if not isinstance(values, dict):
+                continue
+            dates = sorted({
+                str(point.get("date"))
+                for target in target_names
+                for point in values.get(target, []) or []
+                if isinstance(point, dict) and point.get("date") is not None
+            })
+            for date in dates:
+                total = 0.0
+                present = 0
+                for target in target_names:
+                    point = next((p for p in values.get(target, []) or [] if str(p.get("date")) == date), None)
+                    if point is None:
+                        continue
+                    present += 1
+                    total += float(point.get("value") or 0)
+                if present == len(target_names) and abs(total - expected) > tolerance:
+                    return f"{label.title()} constrained outputs do not sum to {expected:g} for scenario {scenario} at {date}."
+        return ""
+
+    def _extract_total_count(self, text: str) -> float:
+        for pattern in [
+            r"(?:assembly size|total seats|seats|total count|total)\s*[:=]?\s*(\d{2,5})",
+            r"(\d{2,5})\s+seats",
+        ]:
+            match = re.search(pattern, text or "", flags=re.IGNORECASE)
+            if match:
+                value = float(match.group(1))
+                return value if 1 <= value <= 100000 else 0.0
+        return 0.0
+
     def diagnostic_message(self, validation: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "title": "Simulation evidence insufficient",
@@ -165,7 +287,7 @@ class NumericValidationService:
                 "Generate or repair the domain simulation plan.",
                 "Generate causal agents with numeric forecast responsibilities.",
                 "Run the simulation so each required agent emits forecast paths with date, value, unit, scenario, and confidence.",
-                "Ensure base, upside, downside, and tail scenarios are present when required.",
+                "Ensure every prompt-required scenario path has complete forecast points.",
                 "Retry report generation only after validation passes.",
             ],
         }
@@ -182,6 +304,23 @@ class NumericValidationService:
             except ValueError:
                 return False
         return False
+
+    def _required_scenarios(self, domain_plan: Dict[str, Any]) -> Set[str]:
+        scenario_structure = domain_plan.get("scenario_structure") or {}
+        scenario_paths = scenario_structure.get("scenarios") if isinstance(scenario_structure, dict) else []
+        if isinstance(scenario_paths, list) and scenario_paths:
+            scenarios = {
+                str(item.get("id") or item.get("name") or "").strip()
+                for item in scenario_paths
+                if isinstance(item, dict) and item.get("required", True)
+            }
+            scenarios = {scenario for scenario in scenarios if scenario}
+            if scenarios:
+                return scenarios
+        return {
+            scenario for flag, scenario in FALLBACK_SCENARIO_FLAGS.items()
+            if scenario_structure.get(flag, True)
+        }
 
     def _is_valid_confidence(self, value: Any) -> bool:
         if not self._is_valid_number(value):
