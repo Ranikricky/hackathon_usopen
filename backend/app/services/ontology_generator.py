@@ -143,10 +143,56 @@ def _context_label(text: str) -> str:
     return " ".join(cleaned.split()[:8]).strip() or "custom simulation"
 
 
-def _extract_explicit_agent_types(text: str, limit: int = 18) -> List[Tuple[str, str]]:
+def _extract_numbered_agent_list(text: str, limit: int = 40) -> List[Tuple[str, str]]:
+    """Extract agents from sections like "Create 14 agents: 1. ... 2. ..."."""
+    if not text:
+        return []
+
+    normalized = text.replace("—", "-").replace("–", "-")
+    section_match = re.search(
+        r"(?:create|generate|use|define)\s+(?:\d+\s+)?(?:[\w -]+\s+)?agents?\s*:?\s*(.+?)(?:\n\s*(?:for every agent|run the simulation|run four scenarios|required output|rules)\b|$)",
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not section_match:
+        return []
+
+    section = section_match.group(1)
+    items: List[Tuple[str, str]] = []
+    for match in re.finditer(r"(?:^|\n)\s*(?:\d+[\.)]|[-*•])\s+(.+?)(?=\n\s*(?:\d+[\.)]|[-*•])|\Z)", section, flags=re.DOTALL):
+        raw = re.sub(r"\s+", " ", match.group(1)).strip(" .;:-")
+        raw = re.split(r"\b(?:bias|trusted evidence|blind spots|numeric forecast)\b", raw, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        if not raw or len(raw) > 90:
+            continue
+        name = _to_pascal_case(raw)
+        if name and name not in {"Unknown", "Person", "Organization"}:
+            items.append((name, f"Explicitly requested simulation agent: {raw}."))
+        if len(items) >= limit:
+            break
+    return _dedupe_agent_tuples(items)
+
+
+def _dedupe_agent_tuples(agents: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """Deduplicate agent tuples by normalized entity name while preserving order."""
+    seen = set()
+    deduped = []
+    for name, description in agents:
+        normalized = _to_pascal_case(name)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append((normalized, description))
+    return deduped
+
+
+def _extract_explicit_agent_types(text: str, limit: int = 40) -> List[Tuple[str, str]]:
     """Extract roles from explicit agent sections in the prompt/context."""
     if not text:
         return []
+
+    numbered_agents = _extract_numbered_agent_list(text, limit=limit)
+    if numbered_agents:
+        return numbered_agents
 
     normalized = text.replace("—", "-").replace("–", "-")
     sections = []
@@ -282,6 +328,125 @@ def _select_run_agent_types(
     return anchors + pool[: max(0, limit - len(anchors))]
 
 
+def _prompt_scope_score(text: str) -> int:
+    """Estimate simulation breadth from the prompt without domain-specific branches."""
+    lowered = (text or "").lower()
+    line_items = len(re.findall(r"(?:^|\n)\s*(?:\d+[\.)]|[-*•])\s+", text or ""))
+    complexity_terms = [
+        "region", "regional", "scenario", "scenarios", "agent", "agents",
+        "numeric", "forecast", "probability", "confidence", "uncertainty",
+        "table", "matrix", "turnout", "vote", "seat", "monthly", "quarterly",
+        "daily", "weekly", "source", "research", "web", "debate", "simulate",
+        "alliance", "swing", "baseline", "historical", "sensitivity",
+    ]
+    term_hits = sum(1 for term in complexity_terms if term in lowered)
+    return min(40, line_items + term_hits)
+
+
+def _target_entity_count(explicit_count: int, inferred_count: int, text: str) -> int:
+    """Choose ontology size from explicit prompt scope, with generous safety bounds."""
+    if explicit_count:
+        base = explicit_count + len(CONTROL_ENTITY_TYPES)
+    else:
+        scope = _prompt_scope_score(text)
+        base = max(8, min(18, 8 + scope // 4, inferred_count + len(CONTROL_ENTITY_TYPES)))
+    return max(6, min(48, base))
+
+
+def _target_edge_count(entity_count: int, relationship_count: int, text: str) -> int:
+    """Choose relationship density from actor count and prompt scope."""
+    scope = _prompt_scope_score(text)
+    base = max(12, entity_count + scope // 2, relationship_count)
+    return max(8, min(96, base))
+
+
+def _agent_role(name: str) -> str:
+    """Classify an agent/entity name into a broad role for relationship design."""
+    lowered = re.sub(r"([a-z])([A-Z])", r"\1 \2", name).lower()
+    if any(term in lowered for term in ["strategist", "campaign", "party", "candidate"]):
+        return "campaign"
+    if any(term in lowered for term in ["voter", "beneficiary", "rural", "urban", "minority", "youth", "worker", "consumer", "public", "household"]):
+        return "constituency"
+    if any(term in lowered for term in ["pollster", "data scientist", "data", "quant", "model"]):
+        return "data"
+    if any(term in lowered for term in ["journalist", "media", "narrative", "influencer"]):
+        return "narrative"
+    if any(term in lowered for term in ["observer", "booth", "field", "reporter", "watchdog", "auditor"]):
+        return "ground_signal"
+    if any(term in lowered for term in ["business", "industry", "market", "investor", "trader", "producer", "supplier"]):
+        return "economic_signal"
+    if any(term in lowered for term in ["negotiator", "mediator", "alliance", "coalition"]):
+        return "negotiator"
+    if any(term in lowered for term in ["moderator", "research", "synthesizer"]):
+        return "process"
+    return "actor"
+
+
+def _edge(name: str, description: str, source: str, target: str) -> Tuple[str, str, str, str]:
+    return (name.upper(), _safe_description(description, description), _to_pascal_case(source), _to_pascal_case(target))
+
+
+def _relationship_edges_for_agents(agents: List[Tuple[str, str]]) -> List[Tuple[str, str, str, str]]:
+    """Create role-aware relationships from explicit/context-derived agents.
+
+    This stays domain-general: it uses role words from the prompt-derived agent
+    names instead of any hardcoded election, macro, oil, or Bengal roster.
+    """
+    names = [_to_pascal_case(name) for name, _ in agents]
+    roles = {name: _agent_role(name) for name in names}
+    campaigns = [name for name, role in roles.items() if role == "campaign"]
+    constituencies = [name for name, role in roles.items() if role == "constituency"]
+    data_agents = [name for name, role in roles.items() if role == "data"]
+    narrative_agents = [name for name, role in roles.items() if role == "narrative"]
+    ground_agents = [name for name, role in roles.items() if role == "ground_signal"]
+    economic_agents = [name for name, role in roles.items() if role == "economic_signal"]
+    negotiators = [name for name, role in roles.items() if role == "negotiator"]
+
+    edges: List[Tuple[str, str, str, str]] = []
+
+    for source in campaigns[:4]:
+        for target in constituencies[:6]:
+            edges.append(_edge("TARGETS_AND_MOBILIZES", "Campaign actor targets or mobilizes this participant bloc.", source, target))
+
+    for idx, source in enumerate(campaigns[:4]):
+        for target in campaigns[idx + 1:4]:
+            edges.append(_edge("CONTESTS_ELECTORAL_SPACE", "Competes with another actor over support, seats, resources, or legitimacy.", source, target))
+
+    for source in negotiators[:3]:
+        for target in campaigns[:4]:
+            if source != target:
+                edges.append(_edge("NEGOTIATES_ALIGNMENT", "Negotiates alliance, coordination, or vote-transfer assumptions.", source, target))
+
+    for source in narrative_agents[:3]:
+        for target in (constituencies[:3] + campaigns[:3]):
+            edges.append(_edge("SHAPES_PUBLIC_NARRATIVE", "Frames claims, scandals, sentiment, or legitimacy for this actor.", source, target))
+
+    for source in data_agents[:4]:
+        edges.append(_edge("SUPPLIES_FORECAST_DATA", "Provides numeric evidence, survey signals, model outputs, or uncertainty estimates.", source, "QuantitativeSynthesizer"))
+        edges.append(_edge("SUBMITS_EVIDENCE_FOR_AUDIT", "Sends quantitative claims for source-quality and leakage checks.", source, "EvidenceAuditor"))
+
+    for source in ground_agents[:5]:
+        edges.append(_edge("REPORTS_GROUND_SIGNAL", "Reports local field evidence, operational signals, or governance risk.", source, "EvidenceAuditor"))
+        edges.append(_edge("INFORMS_FORECAST_ASSUMPTIONS", "Feeds local signal into numeric scenario assumptions.", source, "QuantitativeSynthesizer"))
+
+    for source in economic_agents[:3]:
+        edges.append(_edge("REPORTS_ECONOMIC_SENTIMENT", "Reports business, industry, jobs, market, or resource sentiment.", source, "QuantitativeSynthesizer"))
+
+    for source in constituencies[:6]:
+        edges.append(_edge("EXPRESSES_PARTICIPANT_PREFERENCE", "Represents lived experience, turnout propensity, or demand-side behavior.", source, "QuantitativeSynthesizer"))
+
+    edges.extend(CONTROL_EDGE_TYPES)
+    deduped: List[Tuple[str, str, str, str]] = []
+    seen = set()
+    for edge_tuple in edges:
+        key = (edge_tuple[0], edge_tuple[2], edge_tuple[3])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(edge_tuple)
+    return deduped or list(GENERIC_EDGE_TYPES)
+
+
 def _entity(name: str, description: str, examples: Optional[List[str]] = None) -> Dict[str, Any]:
     return {
         "name": _to_pascal_case(name),
@@ -319,9 +484,15 @@ def _ensure_control_edges(edge_types: List[Dict[str, Any]], max_count: int) -> L
     control_names = {name for name, _, _, _ in CONTROL_EDGE_TYPES}
     for edge in edge_types:
         name = str(edge.get("name", "")).upper()
-        if not name or name in seen or name in control_names:
+        targets = tuple(
+            (str(st.get("source", "")), str(st.get("target", "")))
+            for st in edge.get("source_targets", []) or []
+            if isinstance(st, dict)
+        )
+        key = (name, targets)
+        if not name or key in seen or name in control_names:
             continue
-        seen.add(name)
+        seen.add(key)
         edge["name"] = name
         domain_edges.append(edge)
 
@@ -372,13 +543,16 @@ Return this JSON shape:
 }
 
 Design rules:
-1. Return 6-10 entity types. These are actor categories, not the final number of simulation agents.
-2. Reserve process roles for SimulationModerator, ExternalResearchScout, EvidenceAuditor, QuantitativeSynthesizer, and NegotiationMediator.
-3. Use remaining slots for prompt/research-derived causal actors, affected groups, decision makers, data providers, and narrative actors.
+1. If the prompt explicitly lists agents, preserve those listed agent roles before adding any inferred roles.
+2. Return enough entity types to cover explicit agents plus process roles; do not truncate an explicit agent list to 10.
+3. Reserve process roles for SimulationModerator, ExternalResearchScout, EvidenceAuditor, QuantitativeSynthesizer, and NegotiationMediator.
+4. Use remaining slots for prompt/research-derived causal actors, affected groups, decision makers, data providers, and narrative actors.
 4. Include Person and Organization only when useful and when there is room.
 5. Entity types must be real actors, not abstract concepts.
-6. Relationship source_targets must reference defined entity types where possible.
-7. All output text must be English.
+6. Do not turn issues, signals, metrics, or slogans into entity types unless the prompt names them as actors.
+7. Relationship types should encode specific information flows, mobilization, rivalry, negotiation, evidence supply, reporting, auditing, and numeric synthesis.
+8. Relationship source_targets must reference defined entity types where possible.
+9. All output text must be English.
 """
 
 
@@ -425,11 +599,15 @@ class OntologyGenerator:
             logger.warning("Ontology LLM generation failed; using context-derived fallback: %s", exc)
             result = self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed)
 
-        processed = self._validate_and_process(result)
-        if self._looks_like_stale_default(processed, simulation_requirement, document_texts, additional_context):
+        full_text = "\n".join([simulation_requirement or "", additional_context or "", "\n".join(document_texts or [])])
+        explicit_agents = _extract_explicit_agent_types(full_text)
+        processed = self._validate_and_process(result, explicit_agents=explicit_agents, source_text=full_text)
+        if self._looks_like_stale_default(processed, simulation_requirement, document_texts, additional_context, explicit_agents=explicit_agents):
             logger.warning("Ontology output looked stale or weak; using context-derived fallback.")
             processed = self._validate_and_process(
-                self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed)
+                self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed),
+                explicit_agents=explicit_agents,
+                source_text=full_text,
             )
         return processed
 
@@ -441,7 +619,11 @@ class OntologyGenerator:
         generation_seed: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self._validate_and_process(
-            self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed)
+            self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed),
+            explicit_agents=_extract_explicit_agent_types(
+                "\n".join([simulation_requirement or "", additional_context or "", "\n".join(document_texts or [])])
+            ),
+            source_text="\n".join([simulation_requirement or "", additional_context or "", "\n".join(document_texts or [])]),
         )
 
     def _build_user_message(
@@ -517,7 +699,10 @@ For repeated prompts, vary secondary observers and personas while preserving cor
         full_text = "\n".join([simulation_requirement or "", additional_context or "", "\n".join(document_texts or [])])
         explicit_agents = _extract_explicit_agent_types(full_text)
         inferred_agents = explicit_agents or _actor_items_from_text(full_text)
-        inferred_agents = _select_run_agent_types(inferred_agents, generation_seed, limit=8)
+        if explicit_agents:
+            inferred_agents = _dedupe_agent_tuples(inferred_agents)
+        else:
+            inferred_agents = _select_run_agent_types(inferred_agents, generation_seed, limit=8)
 
         if not inferred_agents:
             inferred_agents = list(GENERIC_FALLBACK_ACTORS)
@@ -526,15 +711,24 @@ For repeated prompts, vary secondary observers and personas while preserving cor
             ("Person", "Any individual person not fitting another specific type."),
             ("Organization", "Any organization not fitting another specific type."),
         ]
+        edge_types = _relationship_edges_for_agents(inferred_agents)
         summary = f"Context-derived fallback ontology for {_context_label(full_text)}."
-        return self._build_ontology_payload(entity_types, GENERIC_EDGE_TYPES, summary)
+        return self._build_ontology_payload(entity_types, edge_types, summary)
 
-    def _validate_and_process(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _validate_and_process(
+        self,
+        result: Dict[str, Any],
+        explicit_agents: Optional[List[Tuple[str, str]]] = None,
+        source_text: str = "",
+    ) -> Dict[str, Any]:
         if not isinstance(result, dict):
             result = {}
         result.setdefault("entity_types", [])
         result.setdefault("edge_types", [])
         result.setdefault("analysis_summary", "")
+
+        explicit_agents = explicit_agents or []
+        explicit_names = [_to_pascal_case(name) for name, _ in explicit_agents]
 
         entity_name_map: Dict[str, str] = {}
         normalized_entities = []
@@ -550,6 +744,13 @@ For repeated prompts, vary secondary observers and personas while preserving cor
                 "attributes": self._normalize_attributes(entity.get("attributes")),
                 "examples": entity.get("examples") if isinstance(entity.get("examples"), list) else [],
             })
+
+        existing_names = {entity["name"] for entity in normalized_entities}
+        for name, description in explicit_agents:
+            normalized_name = _to_pascal_case(name)
+            if normalized_name not in existing_names:
+                normalized_entities.append(_entity(normalized_name, description))
+                existing_names.add(normalized_name)
 
         normalized_edges = []
         for edge in result.get("edge_types", []):
@@ -569,8 +770,21 @@ For repeated prompts, vary secondary observers and personas while preserving cor
                 "attributes": edge.get("attributes") if isinstance(edge.get("attributes"), list) else [],
             })
 
-        max_entities = 10
-        max_edges = 10
+        if explicit_agents:
+            explicit_edges = self._normalize_edge_tuples(_relationship_edges_for_agents(explicit_agents))
+            existing_edge_keys = {
+                (edge["name"], tuple((st["source"], st["target"]) for st in edge["source_targets"]))
+                for edge in normalized_edges
+            }
+            for edge in explicit_edges:
+                key = (edge["name"], tuple((st["source"], st["target"]) for st in edge["source_targets"]))
+                if key not in existing_edge_keys:
+                    normalized_edges.append(edge)
+                    existing_edge_keys.add(key)
+
+        input_text = source_text or "\n".join([str(result.get("analysis_summary") or ""), " ".join(explicit_names)])
+        max_entities = _target_entity_count(len(explicit_names), len(normalized_entities), input_text)
+        max_edges = _target_edge_count(max_entities, len(normalized_edges), input_text)
         result["entity_types"] = _ensure_control_entities(normalized_entities, max_entities)
         result["edge_types"] = _ensure_control_edges(normalized_edges, max_edges)
 
@@ -596,12 +810,29 @@ For repeated prompts, vary secondary observers and personas while preserving cor
         deduped_edges = []
         for edge in result["edge_types"]:
             name = edge.get("name", "")
-            if name and name not in seen_edges:
-                seen_edges.add(name)
+            targets = tuple(
+                (str(st.get("source", "")), str(st.get("target", "")))
+                for st in edge.get("source_targets", []) or []
+                if isinstance(st, dict)
+            )
+            key = (name, targets)
+            if name and key not in seen_edges:
+                seen_edges.add(key)
                 deduped_edges.append(edge)
         result["edge_types"] = deduped_edges[:max_edges]
         result["analysis_summary"] = str(result.get("analysis_summary") or "Context-derived ontology.")
         return result
+
+    def _normalize_edge_tuples(self, edge_tuples: List[Tuple[str, str, str, str]]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "name": name.upper(),
+                "description": _safe_description(description, "Relationship between simulation actors."),
+                "source_targets": [{"source": _to_pascal_case(source), "target": _to_pascal_case(target)}],
+                "attributes": [],
+            }
+            for name, description, source, target in edge_tuples
+        ]
 
     def _normalize_attributes(self, attributes: Any) -> List[Dict[str, str]]:
         normalized = []
@@ -627,9 +858,17 @@ For repeated prompts, vary secondary observers and personas while preserving cor
         simulation_requirement: str,
         document_texts: List[str],
         additional_context: Optional[str],
+        explicit_agents: Optional[List[Tuple[str, str]]] = None,
     ) -> bool:
         """Detect weak rosters that contain no prompt-derived actor signal."""
         input_text = "\n".join([simulation_requirement or "", additional_context or "", "\n".join(document_texts or [])])
+        explicit_agents = explicit_agents or _extract_explicit_agent_types(input_text)
+        if explicit_agents:
+            expected = {_to_pascal_case(name).lower() for name, _ in explicit_agents}
+            actual = {str(entity.get("name", "")).lower() for entity in result.get("entity_types", [])}
+            preserved_ratio = len(expected & actual) / max(1, len(expected))
+            return preserved_ratio < 0.75
+
         derived = _actor_items_from_text(input_text, limit=20)
         if not derived:
             return False
