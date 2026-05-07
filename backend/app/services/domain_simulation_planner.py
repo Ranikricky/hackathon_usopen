@@ -506,8 +506,16 @@ Rules:
 
     def _normalize_plan(self, raw: Dict[str, Any], combined_text: str) -> Dict[str, Any]:
         plan = raw if isinstance(raw, dict) else {}
-        targets = self._normalize_target_variables(plan.get("target_variables") or _extract_target_variables(combined_text))
-        archetypes = self._normalize_agents(plan.get("required_agent_archetypes") or _extract_agent_archetypes(combined_text, targets))
+        extracted_targets = _extract_target_variables(combined_text)
+        targets = self._merge_target_variables(
+            self._normalize_target_variables(plan.get("target_variables") or extracted_targets),
+            extracted_targets,
+        )
+        extracted_archetypes = _extract_agent_archetypes(combined_text, targets)
+        archetypes = self._merge_context_agents(
+            self._normalize_agents(plan.get("required_agent_archetypes") or extracted_archetypes),
+            extracted_archetypes,
+        )
         normalized = {
             "domain": str(plan.get("domain") or _context_label(combined_text) or "custom simulation"),
             "user_question": str(plan.get("user_question") or combined_text.split("\n", 1)[0]),
@@ -586,6 +594,23 @@ Rules:
             })
         return out or [{"name": "primary_outcome", "unit": "index", "required": True, "description": "Primary simulated outcome."}]
 
+    def _merge_target_variables(
+        self,
+        primary: List[Dict[str, Any]],
+        extracted: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        merged = list(primary or [])
+        seen = {str(item.get("name", "")).lower() for item in merged}
+        for item in extracted or []:
+            name = str(item.get("name", "")).lower()
+            if not name or name in seen:
+                continue
+            merged.append(item)
+            seen.add(name)
+            if len(merged) >= 12:
+                break
+        return merged or extracted
+
     def _normalize_horizon(self, value: Any) -> Dict[str, Any]:
         horizon = value if isinstance(value, dict) else {}
         granularity = str(horizon.get("granularity") or "event_triggered")
@@ -614,6 +639,23 @@ Rules:
                 "numeric_output_required": bool(item.get("numeric_output_required", True)),
             })
         return out or _extract_agent_archetypes("", [{"name": "primary_outcome"}])
+
+    def _merge_context_agents(
+        self,
+        primary: List[Dict[str, Any]],
+        extracted: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        merged = list(primary or [])
+        seen = {str(item.get("name", "")).lower() for item in merged}
+        for item in extracted or []:
+            name = str(item.get("name", "")).lower()
+            if not name or name in seen:
+                continue
+            merged.append(item)
+            seen.add(name)
+            if len(merged) >= 20:
+                break
+        return merged or extracted
 
     def _normalize_state_variables(self, values: Any) -> List[Dict[str, Any]]:
         out = []
