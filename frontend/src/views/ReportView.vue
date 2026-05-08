@@ -216,6 +216,15 @@ const loadGraph = async (graphId) => {
       addLog(t('log.graphDataLoadSuccess'))
     }
   } catch (err) {
+    graphData.value = {
+      graph_id: graphId,
+      nodes: [],
+      edges: [],
+      node_count: 0,
+      edge_count: 0,
+      stale: true,
+      warning: err.message
+    }
     addLog(t('log.graphLoadFailed', { error: err.message }))
   } finally {
     graphLoading.value = false
