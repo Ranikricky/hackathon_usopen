@@ -12,7 +12,7 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from ..config import Config
-from ..services.supabase_store import SupabaseStore
+from ..services.durable_store import DurableStore
 
 
 class ProjectStatus(str, Enum):
@@ -208,7 +208,7 @@ class ProjectManager:
         meta_path = cls._get_project_meta_path(project.project_id)
         project_dict = project.to_dict()
         cls._safe_write_json(meta_path, project_dict)
-        SupabaseStore.set_json(cls._project_key(project.project_id), project_dict)
+        DurableStore.set_json(cls._project_key(project.project_id), project_dict)
 
     @classmethod
     def save_external_research(cls, project_id: str, research: Dict[str, Any]) -> None:
@@ -216,7 +216,7 @@ class ProjectManager:
         project_dir = cls._get_project_dir(project_id)
         os.makedirs(project_dir, exist_ok=True)
         cls._safe_write_json(cls._get_project_research_path(project_id), research)
-        SupabaseStore.set_json(cls._store_key("external_research", project_id), research)
+        DurableStore.set_json(cls._store_key("external_research", project_id), research)
 
     @classmethod
     def get_external_research(cls, project_id: str) -> Optional[Dict[str, Any]]:
@@ -225,7 +225,7 @@ class ProjectManager:
         if os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        research = SupabaseStore.get_json(cls._store_key("external_research", project_id))
+        research = DurableStore.get_json(cls._store_key("external_research", project_id))
         if isinstance(research, dict):
             cls._safe_write_json(path, research)
             return research
@@ -248,7 +248,7 @@ class ProjectManager:
             with open(meta_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         else:
-            data = SupabaseStore.get_json(cls._project_key(project_id))
+            data = DurableStore.get_json(cls._project_key(project_id))
             if not isinstance(data, dict):
                 return None
             cls._safe_write_json(meta_path, data)
@@ -276,7 +276,7 @@ class ProjectManager:
                 projects.append(project)
                 seen_ids.add(project.project_id)
 
-        for item in SupabaseStore.list_json("project:", limit=limit * 3):
+        for item in DurableStore.list_json("project:", limit=limit * 3):
             if not isinstance(item, dict) or "project_id" not in item:
                 continue
             if item["project_id"] in seen_ids:
@@ -307,17 +307,17 @@ class ProjectManager:
         project_dir = cls._get_project_dir(project_id)
         
         if not os.path.exists(project_dir):
-            deleted_remote = SupabaseStore.delete(cls._project_key(project_id))
-            SupabaseStore.delete(cls._store_key("external_research", project_id))
-            SupabaseStore.delete(cls._store_key("extracted_text", project_id))
-            SupabaseStore.delete(cls._store_key("local_graph", project_id))
+            deleted_remote = DurableStore.delete(cls._project_key(project_id))
+            DurableStore.delete(cls._store_key("external_research", project_id))
+            DurableStore.delete(cls._store_key("extracted_text", project_id))
+            DurableStore.delete(cls._store_key("local_graph", project_id))
             return deleted_remote
         
         shutil.rmtree(project_dir)
-        SupabaseStore.delete(cls._project_key(project_id))
-        SupabaseStore.delete(cls._store_key("external_research", project_id))
-        SupabaseStore.delete(cls._store_key("extracted_text", project_id))
-        SupabaseStore.delete(cls._store_key("local_graph", project_id))
+        DurableStore.delete(cls._project_key(project_id))
+        DurableStore.delete(cls._store_key("external_research", project_id))
+        DurableStore.delete(cls._store_key("extracted_text", project_id))
+        DurableStore.delete(cls._store_key("local_graph", project_id))
         return True
     
     @classmethod
@@ -359,7 +359,7 @@ class ProjectManager:
         """保存提取的文本"""
         text_path = cls._get_project_text_path(project_id)
         cls._safe_write_text(text_path, text)
-        SupabaseStore.set_json(cls._store_key("extracted_text", project_id), {"text": text})
+        DurableStore.set_json(cls._store_key("extracted_text", project_id), {"text": text})
     
     @classmethod
     def get_extracted_text(cls, project_id: str) -> Optional[str]:
@@ -370,7 +370,7 @@ class ProjectManager:
             with open(text_path, 'r', encoding='utf-8') as f:
                 return f.read()
 
-        payload = SupabaseStore.get_json(cls._store_key("extracted_text", project_id))
+        payload = DurableStore.get_json(cls._store_key("extracted_text", project_id))
         if isinstance(payload, dict) and isinstance(payload.get("text"), str):
             cls._safe_write_text(text_path, payload["text"])
             return payload["text"]
@@ -405,7 +405,7 @@ class ProjectManager:
         """保存本地图谱数据"""
         graph_path = cls._get_project_local_graph_path(project_id)
         cls._safe_write_json(graph_path, graph_data)
-        SupabaseStore.set_json(cls._store_key("local_graph", project_id), graph_data)
+        DurableStore.set_json(cls._store_key("local_graph", project_id), graph_data)
 
     @classmethod
     def get_local_graph(cls, project_id: str) -> Optional[Dict[str, Any]]:
@@ -414,7 +414,7 @@ class ProjectManager:
         if os.path.exists(graph_path):
             with open(graph_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        graph_data = SupabaseStore.get_json(cls._store_key("local_graph", project_id))
+        graph_data = DurableStore.get_json(cls._store_key("local_graph", project_id))
         if isinstance(graph_data, dict):
             cls._safe_write_json(graph_path, graph_data)
             return graph_data

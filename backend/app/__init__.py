@@ -13,6 +13,7 @@ from flask import Flask, request, send_from_directory
 from flask_cors import CORS
 
 from .config import Config
+from .services.durable_store import DurableStore
 from .utils.logger import setup_logger, get_logger
 
 
@@ -79,11 +80,7 @@ def create_app(config_class=Config):
     @app.route('/health')
     def health():
         config_warnings = Config.validate()
-        supabase_ready = bool(
-            Config.SUPABASE_ENABLED
-            and Config.SUPABASE_URL
-            and (Config.SUPABASE_SERVICE_ROLE_KEY or Config.SUPABASE_ANON_KEY)
-        )
+        durable_status = DurableStore.provider_status()
         return {
             'status': 'ok',
             'service': 'Horizon XL Backend',
@@ -92,8 +89,12 @@ def create_app(config_class=Config):
                 'warnings': config_warnings,
                 'storage': {
                     'zep_configured': bool(Config.ZEP_API_KEY),
-                    'supabase_configured': supabase_ready,
-                    'durable_fallback': supabase_ready
+                    'git_configured': durable_status.get('git', False),
+                    'durable_fallback': DurableStore.enabled(),
+                    'active_provider': (
+                        'git' if durable_status.get('git')
+                        else 'local_ephemeral'
+                    )
                 }
             }
         }
