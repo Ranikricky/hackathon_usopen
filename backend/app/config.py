@@ -34,6 +34,15 @@ class Config:
     
     # Zep.
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
+
+    # Supabase durable fallback store.
+    # Used to persist Horizon XL project/graph/simulation artifacts when Zep is
+    # unavailable and Render's local filesystem is ephemeral.
+    SUPABASE_URL = os.environ.get('SUPABASE_URL')
+    SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+    SUPABASE_ANON_KEY = os.environ.get('SUPABASE_ANON_KEY')
+    SUPABASE_TABLE = os.environ.get('SUPABASE_TABLE', 'horizon_kv')
+    SUPABASE_ENABLED = os.environ.get('SUPABASE_ENABLED', 'true').lower() == 'true'
     
     # File uploads.
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
@@ -77,6 +86,7 @@ class Config:
         errors = []
         if not cls.LLM_API_KEY:
             errors.append("LLM_API_KEY is not configured")
-        if not cls.ZEP_API_KEY:
-            errors.append("ZEP_API_KEY is not configured")
+        has_supabase = bool(cls.SUPABASE_URL and (cls.SUPABASE_SERVICE_ROLE_KEY or cls.SUPABASE_ANON_KEY))
+        if not cls.ZEP_API_KEY and not has_supabase:
+            errors.append("Neither ZEP_API_KEY nor Supabase durable storage is configured")
         return errors

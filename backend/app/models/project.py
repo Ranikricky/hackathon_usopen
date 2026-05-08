@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from ..config import Config
+from ..services.supabase_store import SupabaseStore
 
 
 class ProjectStatus(str, Enum):
@@ -109,6 +110,26 @@ class ProjectManager:
     
     # 项目存储根目录
     PROJECTS_DIR = os.path.join(Config.UPLOAD_FOLDER, 'projects')
+
+    @classmethod
+    def _store_key(cls, kind: str, project_id: str) -> str:
+        return f"project:{project_id}:{kind}"
+
+    @classmethod
+    def _project_key(cls, project_id: str) -> str:
+        return cls._store_key("meta", project_id)
+
+    @classmethod
+    def _safe_write_text(cls, path: str, text: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    @classmethod
+    def _safe_write_json(cls, path: str, data: Dict[str, Any]) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     
     @classmethod
     def _ensure_projects_dir(cls):
@@ -185,26 +206,30 @@ class ProjectManager:
         """保存项目元数据"""
         project.updated_at = datetime.now().isoformat()
         meta_path = cls._get_project_meta_path(project.project_id)
-        
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
+        project_dict = project.to_dict()
+        cls._safe_write_json(meta_path, project_dict)
+        SupabaseStore.set_json(cls._project_key(project.project_id), project_dict)
 
     @classmethod
     def save_external_research(cls, project_id: str, research: Dict[str, Any]) -> None:
         """保存外部研究包。"""
         project_dir = cls._get_project_dir(project_id)
         os.makedirs(project_dir, exist_ok=True)
-        with open(cls._get_project_research_path(project_id), 'w', encoding='utf-8') as f:
-            json.dump(research, f, ensure_ascii=False, indent=2)
+        cls._safe_write_json(cls._get_project_research_path(project_id), research)
+        SupabaseStore.set_json(cls._store_key("external_research", project_id), research)
 
     @classmethod
     def get_external_research(cls, project_id: str) -> Optional[Dict[str, Any]]:
         """读取外部研究包。"""
         path = cls._get_project_research_path(project_id)
-        if not os.path.exists(path):
-            return None
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        research = SupabaseStore.get_json(cls._store_key("external_research", project_id))
+        if isinstance(research, dict):
+            cls._safe_write_json(path, research)
+            return research
+        return None
     
     @classmethod
     def get_project(cls, project_id: str) -> Optional[Project]:
@@ -219,11 +244,14 @@ class ProjectManager:
         """
         meta_path = cls._get_project_meta_path(project_id)
         
-        if not os.path.exists(meta_path):
-            return None
-        
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        if os.path.exists(meta_path):
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        else:
+            data = SupabaseStore.get_json(cls._project_key(project_id))
+            if not isinstance(data, dict):
+                return None
+            cls._safe_write_json(meta_path, data)
         
         return Project.from_dict(data)
     
@@ -241,10 +269,24 @@ class ProjectManager:
         cls._ensure_projects_dir()
         
         projects = []
+        seen_ids = set()
         for project_id in os.listdir(cls.PROJECTS_DIR):
             project = cls.get_project(project_id)
             if project:
                 projects.append(project)
+                seen_ids.add(project.project_id)
+
+        for item in SupabaseStore.list_json("project:", limit=limit * 3):
+            if not isinstance(item, dict) or "project_id" not in item:
+                continue
+            if item["project_id"] in seen_ids:
+                continue
+            try:
+                project = Project.from_dict(item)
+            except Exception:
+                continue
+            projects.append(project)
+            seen_ids.add(project.project_id)
         
         # 按创建时间倒序排序
         projects.sort(key=lambda p: p.created_at, reverse=True)
@@ -265,9 +307,17 @@ class ProjectManager:
         project_dir = cls._get_project_dir(project_id)
         
         if not os.path.exists(project_dir):
-            return False
+            deleted_remote = SupabaseStore.delete(cls._project_key(project_id))
+            SupabaseStore.delete(cls._store_key("external_research", project_id))
+            SupabaseStore.delete(cls._store_key("extracted_text", project_id))
+            SupabaseStore.delete(cls._store_key("local_graph", project_id))
+            return deleted_remote
         
         shutil.rmtree(project_dir)
+        SupabaseStore.delete(cls._project_key(project_id))
+        SupabaseStore.delete(cls._store_key("external_research", project_id))
+        SupabaseStore.delete(cls._store_key("extracted_text", project_id))
+        SupabaseStore.delete(cls._store_key("local_graph", project_id))
         return True
     
     @classmethod
@@ -308,19 +358,23 @@ class ProjectManager:
     def save_extracted_text(cls, project_id: str, text: str) -> None:
         """保存提取的文本"""
         text_path = cls._get_project_text_path(project_id)
-        with open(text_path, 'w', encoding='utf-8') as f:
-            f.write(text)
+        cls._safe_write_text(text_path, text)
+        SupabaseStore.set_json(cls._store_key("extracted_text", project_id), {"text": text})
     
     @classmethod
     def get_extracted_text(cls, project_id: str) -> Optional[str]:
         """获取提取的文本"""
         text_path = cls._get_project_text_path(project_id)
         
-        if not os.path.exists(text_path):
-            return None
-        
-        with open(text_path, 'r', encoding='utf-8') as f:
-            return f.read()
+        if os.path.exists(text_path):
+            with open(text_path, 'r', encoding='utf-8') as f:
+                return f.read()
+
+        payload = SupabaseStore.get_json(cls._store_key("extracted_text", project_id))
+        if isinstance(payload, dict) and isinstance(payload.get("text"), str):
+            cls._safe_write_text(text_path, payload["text"])
+            return payload["text"]
+        return None
     
     @classmethod
     def get_project_files(cls, project_id: str) -> List[str]:
@@ -350,17 +404,21 @@ class ProjectManager:
     def save_local_graph(cls, project_id: str, graph_data: Dict[str, Any]) -> None:
         """保存本地图谱数据"""
         graph_path = cls._get_project_local_graph_path(project_id)
-        with open(graph_path, 'w', encoding='utf-8') as f:
-            json.dump(graph_data, f, ensure_ascii=False, indent=2)
+        cls._safe_write_json(graph_path, graph_data)
+        SupabaseStore.set_json(cls._store_key("local_graph", project_id), graph_data)
 
     @classmethod
     def get_local_graph(cls, project_id: str) -> Optional[Dict[str, Any]]:
         """读取本地图谱数据"""
         graph_path = cls._get_project_local_graph_path(project_id)
-        if not os.path.exists(graph_path):
-            return None
-        with open(graph_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        if os.path.exists(graph_path):
+            with open(graph_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        graph_data = SupabaseStore.get_json(cls._store_key("local_graph", project_id))
+        if isinstance(graph_data, dict):
+            cls._safe_write_json(graph_path, graph_data)
+            return graph_data
+        return None
 
     @classmethod
     def get_local_graph_by_graph_id(cls, graph_id: str) -> Optional[Dict[str, Any]]:

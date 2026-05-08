@@ -79,12 +79,22 @@ def create_app(config_class=Config):
     @app.route('/health')
     def health():
         config_warnings = Config.validate()
+        supabase_ready = bool(
+            Config.SUPABASE_ENABLED
+            and Config.SUPABASE_URL
+            and (Config.SUPABASE_SERVICE_ROLE_KEY or Config.SUPABASE_ANON_KEY)
+        )
         return {
             'status': 'ok',
             'service': 'Horizon XL Backend',
             'configuration': {
                 'ready': not config_warnings,
-                'warnings': config_warnings
+                'warnings': config_warnings,
+                'storage': {
+                    'zep_configured': bool(Config.ZEP_API_KEY),
+                    'supabase_configured': supabase_ready,
+                    'durable_fallback': supabase_ready
+                }
             }
         }
 
