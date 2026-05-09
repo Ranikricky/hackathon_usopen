@@ -425,7 +425,9 @@ def _prompt_scope_score(text: str) -> int:
 def _target_entity_count(explicit_count: int, inferred_count: int, text: str) -> int:
     """Choose ontology size from explicit prompt scope, with generous safety bounds."""
     if explicit_count:
-        base = explicit_count + len(CONTROL_ENTITY_TYPES)
+        # Preserve every explicitly requested agent, then add orchestration roles
+        # and small generic fallbacks without squeezing prompt actors out.
+        base = explicit_count + len(CONTROL_ENTITY_TYPES) + 2
     else:
         scope = _prompt_scope_score(text)
         base = max(8, min(18, 8 + scope // 4, inferred_count + len(CONTROL_ENTITY_TYPES)))
