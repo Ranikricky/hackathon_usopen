@@ -94,6 +94,7 @@ ACTOR_WORDS = {
     "institutions", "investor", "investors", "journalist", "journalists", "leader",
     "leaders", "maker", "makers", "media", "mediator", "mediators", "ministry",
     "observer", "observers", "official", "officials", "operator", "operators",
+    "organizer", "organizers", "bloc", "blocs", "block", "blocks",
     "organization", "organizations", "participant", "participants", "party", "parties",
     "people", "platform", "platforms", "pollster", "pollsters", "producer", "producers",
     "provider", "providers", "owner", "owners", "landlord", "landlords", "influencer",
@@ -111,7 +112,17 @@ NON_ACTOR_PHRASES = {
     "target variables", "scenario paths", "data tables", "final prompt", "copy paste",
     "date", "section", "expected", "forecast horizon", "time pocket", "time pockets",
     "markdown format", "full context", "research packet", "source notes",
+    "discovery queries", "generated at", "external web result", "no readable excerpt",
+    "landlines", "sms-to-web", "source discovered",
 }
+
+
+RESEARCH_PACKET_MARKERS = [
+    "=== EXTERNAL_RESEARCH_PACKET ===",
+    "# External Research Packet",
+    "## Source Notes",
+    "## Discovery Queries",
+]
 
 
 def _to_pascal_case(name: str) -> str:
@@ -219,6 +230,38 @@ def _extract_explicit_agent_types(text: str, limit: int = 40) -> List[Tuple[str,
     if " - " in candidate_text:
         candidate_text = candidate_text.split(" - ", 1)[1]
     return _actor_items_from_text(candidate_text, limit=limit)
+
+
+def _without_external_research(text: str) -> str:
+    """Keep prompt/upload text separate from provisional web research snippets."""
+    if not text:
+        return ""
+    earliest = len(text)
+    for marker in RESEARCH_PACKET_MARKERS:
+        idx = text.find(marker)
+        if idx >= 0:
+            earliest = min(earliest, idx)
+    return text[:earliest].strip()
+
+
+def _quality_actor_items(text: str, limit: int = 18) -> List[Tuple[str, str]]:
+    """Infer actors, filtering out research artifacts and metric/result fragments."""
+    blocked_name_fragments = {
+        "result", "results", "landline", "landlines", "sms", "web", "query",
+        "source", "snippet", "excerpt", "uncertaintybuild", "analysisactor",
+    }
+    items = _actor_items_from_text(text, limit=limit * 2)
+    filtered: List[Tuple[str, str]] = []
+    for name, description in items:
+        spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", name).lower()
+        if any(fragment in spaced for fragment in blocked_name_fragments):
+            continue
+        if any(stop in spaced for stop in NON_ACTOR_PHRASES):
+            continue
+        filtered.append((name, description))
+        if len(filtered) >= limit:
+            break
+    return _dedupe_agent_tuples(filtered)
 
 
 def _actor_items_from_text(text: str, limit: int = 18) -> List[Tuple[str, str]]:
@@ -705,8 +748,16 @@ For repeated prompts, vary secondary observers and personas while preserving cor
         generation_seed: Optional[str] = None,
     ) -> Dict[str, Any]:
         full_text = "\n".join([simulation_requirement or "", additional_context or "", "\n".join(document_texts or [])])
-        explicit_agents = _extract_explicit_agent_types(full_text)
-        inferred_agents = explicit_agents or _actor_items_from_text(full_text)
+        primary_text = "\n".join([simulation_requirement or "", additional_context or ""]).strip()
+        non_research_text = _without_external_research(full_text)
+
+        # Actor creation must be anchored in the user prompt/uploaded context.
+        # Web research can inform evidence later, but search snippets should not
+        # become agents just because a search-result page mentioned a metric.
+        explicit_agents = _extract_explicit_agent_types(primary_text) or _extract_explicit_agent_types(non_research_text)
+        inferred_agents = explicit_agents or _quality_actor_items(primary_text)
+        if not inferred_agents:
+            inferred_agents = _quality_actor_items(non_research_text)
         if explicit_agents:
             inferred_agents = _dedupe_agent_tuples(inferred_agents)
         else:
