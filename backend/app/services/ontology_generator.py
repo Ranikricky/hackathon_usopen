@@ -209,6 +209,16 @@ def _extract_explicit_agent_types(text: str, limit: int = 40) -> List[Tuple[str,
         return numbered_agents
 
     normalized = text.replace("—", "-").replace("–", "-")
+    included_agent_items: List[Tuple[str, str]] = []
+    for match in re.finditer(
+        r"agents?[^.\n]{0,180}?\bincluding\s+([^.\n]+)",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        included_agent_items.extend(_actor_items_from_text(match.group(1), limit=limit))
+    if included_agent_items:
+        return _dedupe_agent_tuples(included_agent_items)[:limit]
+
     sections = []
     for pattern in [
         r"agent architecture.*?(?:target variables|time-pocket|scenario paths|data tables|final horizon|$)",
@@ -275,6 +285,7 @@ def _is_low_quality_entity_name(name: str, description: str = "") -> bool:
         "external research packet", "no readable excerpt", "generated at",
         "background context", "mixed mode", "online 400", "direction actor",
         "simulate a", "forecast vote", "produce numeric", "build relevant",
+        "using actor", "uncertainty build", "expert blog analysis",
     }
     if any(fragment in combined for fragment in blocked_fragments):
         return True

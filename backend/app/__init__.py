@@ -84,6 +84,7 @@ def create_app(config_class=Config):
         return {
             'status': 'ok',
             'service': 'Horizon XL Backend',
+            'build_marker': 'ontology_prompt_anchor_v3',
             'configuration': {
                 'ready': not config_warnings,
                 'warnings': config_warnings,
