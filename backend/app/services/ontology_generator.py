@@ -249,6 +249,8 @@ def _quality_actor_items(text: str, limit: int = 18) -> List[Tuple[str, str]]:
     blocked_name_fragments = {
         "result", "results", "landline", "landlines", "sms", "web", "query",
         "source", "snippet", "excerpt", "uncertaintybuild", "analysisactor",
+        "simulate", "forecast", "direction", "approach", "online", "background",
+        "context",
     }
     items = _actor_items_from_text(text, limit=limit * 2)
     filtered: List[Tuple[str, str]] = []
@@ -262,6 +264,26 @@ def _quality_actor_items(text: str, limit: int = 18) -> List[Tuple[str, str]]:
         if len(filtered) >= limit:
             break
     return _dedupe_agent_tuples(filtered)
+
+
+def _is_low_quality_entity_name(name: str, description: str = "") -> bool:
+    """Reject metric/search-artifact names that are not credible actor classes."""
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", name or "").lower()
+    combined = f"{spaced} {description or ''}".lower()
+    blocked_fragments = {
+        "landline", "sms", "query", "snippet", "excerpt", "source notes",
+        "external research packet", "no readable excerpt", "generated at",
+        "background context", "mixed mode", "online 400", "direction actor",
+        "simulate a", "forecast vote", "produce numeric", "build relevant",
+    }
+    if any(fragment in combined for fragment in blocked_fragments):
+        return True
+    words = [word for word in re.findall(r"[a-z0-9]+", spaced) if word]
+    if not words:
+        return True
+    if "actor" in words and not any(word in ACTOR_WORDS - {"actor", "actors", "agent", "agents"} for word in words):
+        return True
+    return False
 
 
 def _actor_items_from_text(text: str, limit: int = 18) -> List[Tuple[str, str]]:
@@ -796,10 +818,13 @@ For repeated prompts, vary secondary observers and personas while preserving cor
                 continue
             original = str(entity.get("name") or "Unknown")
             name = _to_pascal_case(original)
+            description = _safe_description(entity.get("description", ""), f"{name} actor.")
+            if _is_low_quality_entity_name(name, description):
+                continue
             entity_name_map[original] = name
             normalized_entities.append({
                 "name": name,
-                "description": _safe_description(entity.get("description", ""), f"{name} actor."),
+                "description": description,
                 "attributes": self._normalize_attributes(entity.get("attributes")),
                 "examples": entity.get("examples") if isinstance(entity.get("examples"), list) else [],
             })
