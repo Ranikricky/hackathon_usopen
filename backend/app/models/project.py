@@ -120,6 +120,10 @@ class ProjectManager:
         return cls._store_key("meta", project_id)
 
     @classmethod
+    def _graph_index_key(cls, graph_id: str) -> str:
+        return f"graph_index:{graph_id}"
+
+    @classmethod
     def _safe_write_text(cls, path: str, text: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
@@ -209,6 +213,11 @@ class ProjectManager:
         project_dict = project.to_dict()
         cls._safe_write_json(meta_path, project_dict)
         DurableStore.set_json(cls._project_key(project.project_id), project_dict)
+        if project.graph_id:
+            DurableStore.set_json(
+                cls._graph_index_key(project.graph_id),
+                {"project_id": project.project_id, "graph_id": project.graph_id},
+            )
 
     @classmethod
     def save_external_research(cls, project_id: str, research: Dict[str, Any]) -> None:
@@ -395,7 +404,22 @@ class ProjectManager:
         """根据 graph_id 查找项目"""
         if not graph_id:
             return None
-        for project in cls.list_projects(limit=1000):
+
+        # Fast durable lookup. Do not scan the whole artifact store from a
+        # graph-rendering request; Git-backed storage can be slow enough to make
+        # the browser report this as a network error.
+        graph_index = DurableStore.get_json(cls._graph_index_key(graph_id))
+        if isinstance(graph_index, dict) and graph_index.get("project_id"):
+            project = cls.get_project(str(graph_index["project_id"]))
+            if project and project.graph_id == graph_id:
+                return project
+
+        # Local cache fallback only. Avoid list_projects() here because it also
+        # consults durable providers and can turn a simple graph lookup into a
+        # remote tree scan.
+        cls._ensure_projects_dir()
+        for project_id in os.listdir(cls.PROJECTS_DIR):
+            project = cls.get_project(project_id)
             if project.graph_id == graph_id:
                 return project
         return None
@@ -406,6 +430,12 @@ class ProjectManager:
         graph_path = cls._get_project_local_graph_path(project_id)
         cls._safe_write_json(graph_path, graph_data)
         DurableStore.set_json(cls._store_key("local_graph", project_id), graph_data)
+        graph_id = graph_data.get("graph_id")
+        if graph_id:
+            DurableStore.set_json(
+                cls._graph_index_key(str(graph_id)),
+                {"project_id": project_id, "graph_id": str(graph_id)},
+            )
 
     @classmethod
     def get_local_graph(cls, project_id: str) -> Optional[Dict[str, Any]]:
