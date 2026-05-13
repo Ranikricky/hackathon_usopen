@@ -51,10 +51,14 @@ export function getTaskStatus(taskId) {
  * @returns {Promise}
  */
 export function getGraphData(graphId) {
-  return service({
-    url: `/api/graph/data/${graphId}`,
-    method: 'get'
-  })
+  return requestWithRetry(() =>
+    service({
+      url: `/api/graph/data/${graphId}`,
+      method: 'get'
+    }),
+    4,
+    1500
+  )
 }
 
 /**
@@ -63,10 +67,14 @@ export function getGraphData(graphId) {
  * @returns {Promise}
  */
 export function getProject(projectId) {
-  return service({
-    url: `/api/graph/project/${projectId}`,
-    method: 'get'
-  })
+  return requestWithRetry(() =>
+    service({
+      url: `/api/graph/project/${projectId}`,
+      method: 'get'
+    }),
+    4,
+    1500
+  )
 }
 
 /**
