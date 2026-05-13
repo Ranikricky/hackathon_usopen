@@ -211,7 +211,7 @@ def _extract_explicit_agent_types(text: str, limit: int = 40) -> List[Tuple[str,
     normalized = text.replace("—", "-").replace("–", "-")
     included_agent_items: List[Tuple[str, str]] = []
     for match in re.finditer(
-        r"agents?[^.\n]{0,180}?\bincluding\s+([^.\n]+)",
+        r"agents?[^.\n]{0,180}?\b(?:including|from\s+the\s+prompt\s*:)\s+([^.\n]+)",
         normalized,
         flags=re.IGNORECASE,
     ):
