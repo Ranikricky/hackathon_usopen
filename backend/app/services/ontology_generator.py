@@ -11,8 +11,10 @@ when they are present in that input context.
 import logging
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.locale import get_language_instruction
 
@@ -104,6 +106,8 @@ ACTOR_WORDS = {
     "segment", "segments", "strategist", "strategists", "supplier", "suppliers",
     "trader", "traders", "union", "unions", "user", "users", "voter", "voters",
     "watchdog", "watchdogs", "worker", "workers",
+    "miner", "miners", "refiner", "refiners", "manufacturer", "manufacturers",
+    "automaker", "automakers", "logistics",
 }
 
 
@@ -111,9 +115,46 @@ NON_ACTOR_PHRASES = {
     "input pack", "simulation question", "historical baseline", "current context",
     "target variables", "scenario paths", "data tables", "final prompt", "copy paste",
     "date", "section", "expected", "forecast horizon", "time pocket", "time pockets",
+    "boom baseline", "current state snapshot", "scenario synthesis", "response pocket",
+    "shock pocket", "baseline pocket", "inventory correction",
     "markdown format", "full context", "research packet", "source notes",
     "discovery queries", "generated at", "external web result", "no readable excerpt",
     "landlines", "sms-to-web", "source discovered",
+    "agent disagreement", "then explain agent disagreement",
+    "output numeric forecasts", "numeric forecasts first",
+    "historical", "required", "create", "using", "available", "forecast",
+    "make a concrete claim", "cite book canon evidence", "cite book-canon evidence",
+    "cite book canon evidence or foreshadowing", "cite book-canon evidence or foreshadowing",
+    "challenge another agent", "explain what would change their view",
+    "separate fact inference and speculation", "avoid show canon leakage",
+    "agents must not just announce their roles", "must not just announce their roles",
+}
+
+PROCESS_OR_PARAMETER_ROLE_PHRASES = {
+    "simulation moderator", "moderator", "negotiation mediator", "mediator",
+    "evidence auditor", "evidence auditors", "external research scout",
+    "research scout", "data retrieval analyst", "quantitative synthesizer",
+    "forecast horizon", "target variable", "state variable", "scenario path",
+    "time pocket", "pocket", "validation", "required output",
+}
+
+NON_ACTOR_UNIT_OR_METRIC_WORDS = {
+    "usd", "lfp", "kwh", "price", "prices", "pricing", "rate", "rates",
+    "growth", "margin", "pressure", "index", "probability", "forecast",
+    "forecasts", "path", "paths", "scenario", "scenarios", "baseline",
+    "snapshot", "pocket", "synthesis", "inventory", "cover", "spodumene",
+    "carbonate", "concentrate", "cost", "costs", "metric", "ton", "tons",
+    "tonne", "tonnes", "balance", "premium", "deficit", "oversupply",
+    "historical", "required", "create", "the", "at", "development", "design",
+    "performance", "safety", "technology", "traceability", "industrialization",
+}
+
+NON_ACTOR_SENTENCE_WORDS = {
+    "faced", "faces", "face", "enabled", "enables", "enable", "created",
+    "creates", "create", "drove", "drives", "drive", "reduced", "reduces",
+    "increase", "increases", "increased", "decrease", "decreases", "decreased",
+    "balanced", "balances", "balance", "against", "from", "through", "because",
+    "while", "after", "before", "during",
 }
 
 
@@ -127,12 +168,26 @@ RESEARCH_PACKET_MARKERS = [
 
 def _to_pascal_case(name: str) -> str:
     """Convert arbitrary text to PascalCase."""
+    name = re.sub(r"^\s*(?:a|an|the)\s+", "", name or "", flags=re.IGNORECASE)
     parts = re.split(r"[^a-zA-Z0-9]+", name)
     words: List[str] = []
     for part in parts:
-        words.extend(re.sub(r"([a-z])([A-Z])", r"\1_\2", part).split("_"))
-    result = "".join(word.capitalize() for word in words if word)
+        split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", part)
+        split = re.sub(r"([a-z])([A-Z])", r"\1_\2", split)
+        words.extend(split.split("_"))
+    formatted = []
+    for word in words:
+        if not word:
+            continue
+        formatted.append(word.upper() if re.fullmatch(r"[A-Z0-9]{2,8}", word) else word.capitalize())
+    result = "".join(formatted)
     return result or "Unknown"
+
+
+def _space_pascal_name(name: str) -> str:
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", name or "")
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", spaced)
+    return spaced.lower()
 
 
 def _safe_description(text: str, fallback: str) -> str:
@@ -157,6 +212,40 @@ def _context_label(text: str) -> str:
     return " ".join(cleaned.split()[:8]).strip() or "custom simulation"
 
 
+def _is_election_context(text: str) -> bool:
+    lowered = (text or "").lower()
+    return bool(re.search(
+        r"\b(election|polling|vote\s+share|seat\s+share|turnout|voters?|candidate|candidates|ballot|hung\s+assembly|majority\s+mark)\b",
+        lowered,
+    ))
+
+
+def _is_narrative_context(text: str) -> bool:
+    lowered = (text or "").lower()
+    return bool(re.search(
+        r"\b(novel|book[- ]canon|canon|fiction|story|storyline|characters?|chapter|unpublished|"
+        r"song\s+of\s+ice\s+and\s+fire|asoiaf|winds\s+of\s+winter|foreshadowing|prophecy|throne|thrones?)\b",
+        lowered,
+    ))
+
+
+def _is_instruction_like_actor_name(name: str, description: str = "") -> bool:
+    """Reject imperative prompt instructions that were accidentally parsed as actors."""
+    spaced = _space_pascal_name(name or "")
+    combined = f"{spaced} {description or ''}".lower()
+    imperative_patterns = [
+        r"^(?:make|cite|challenge|explain|separate|avoid|do|produce|output|write|generate|include|clearly)\b",
+        r"\bagents?\s+must\b",
+        r"\bmust\s+not\s+just\s+announce\b",
+        r"\bconcrete\s+claim\b",
+        r"\bbook[- ]canon\s+evidence\b",
+        r"\bwhat\s+would\s+change\s+their\s+view\b",
+        r"\bfact\s+inference\s+and\s+speculation\b",
+        r"\bshow\s+canon\s+leakage\b",
+    ]
+    return any(re.search(pattern, combined, flags=re.IGNORECASE) for pattern in imperative_patterns)
+
+
 def _extract_numbered_agent_list(text: str, limit: int = 40) -> List[Tuple[str, str]]:
     """Extract agents from sections like "Create 14 agents: 1. ... 2. ..."."""
     if not text:
@@ -164,7 +253,7 @@ def _extract_numbered_agent_list(text: str, limit: int = 40) -> List[Tuple[str, 
 
     normalized = text.replace("—", "-").replace("–", "-")
     section_match = re.search(
-        r"(?:create|generate|use|define)\s+(?:\d+\s+)?(?:[\w -]+\s+)?agents?\s*:?\s*(.+?)(?:\n\s*(?:for every agent|run the simulation|run four scenarios|required output|rules)\b|$)",
+        r"(?:create|generate|use|define)\s+(?:\d+\s+)?(?:[\w -]+\s+)?agents?\s*:?\s*(.+?)(?:\n\s*(?:agents?\s+must|agents?\s+should|each\s+agent|for every agent|run sequential|run the simulation|time[- ]?pockets?|run four scenarios|required output|rules)\b|$)",
         normalized,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -211,7 +300,7 @@ def _extract_explicit_agent_types(text: str, limit: int = 40) -> List[Tuple[str,
     normalized = text.replace("—", "-").replace("–", "-")
     included_agent_items: List[Tuple[str, str]] = []
     for match in re.finditer(
-        r"agents?[^.\n]{0,180}?\b(?:including|from\s+the\s+prompt\s*:)\s+([^.\n]+)",
+        r"(?:agents?[^.\n]{0,180}?\b(?:including|from\s+the\s+prompt\s*:)|simulation\s+should\s+consider|should\s+consider|at\s+minimum[^.\n]{0,80}?\bconsider)\s+([^.\n]+)",
         normalized,
         flags=re.IGNORECASE,
     ):
@@ -260,15 +349,27 @@ def _quality_actor_items(text: str, limit: int = 18) -> List[Tuple[str, str]]:
         "result", "results", "landline", "landlines", "sms", "web", "query",
         "source", "snippet", "excerpt", "uncertaintybuild", "analysisactor",
         "simulate", "forecast", "direction", "approach", "online", "background",
-        "context",
+        "context", "then explain", "numeric forecasts", "using", "may", "run",
+        "output", "assembly", "bengal", "probability",
+        "make concrete claim", "cite book canon evidence", "challenge another",
+        "explain what would change", "separate fact inference", "avoid show canon",
     }
     items = _actor_items_from_text(text, limit=limit * 2)
     filtered: List[Tuple[str, str]] = []
     for name, description in items:
-        spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", name).lower()
+        spaced = _space_pascal_name(name)
+        words = set(re.findall(r"[a-z0-9]+", spaced))
+        if len(words) >= 5 and words & NON_ACTOR_SENTENCE_WORDS:
+            continue
         if any(fragment in spaced for fragment in blocked_name_fragments):
             continue
+        if _is_instruction_like_actor_name(name, description):
+            continue
         if any(stop in spaced for stop in NON_ACTOR_PHRASES):
+            continue
+        if any(phrase in spaced for phrase in PROCESS_OR_PARAMETER_ROLE_PHRASES):
+            continue
+        if words and words <= NON_ACTOR_UNIT_OR_METRIC_WORDS:
             continue
         filtered.append((name, description))
         if len(filtered) >= limit:
@@ -278,19 +379,34 @@ def _quality_actor_items(text: str, limit: int = 18) -> List[Tuple[str, str]]:
 
 def _is_low_quality_entity_name(name: str, description: str = "") -> bool:
     """Reject metric/search-artifact names that are not credible actor classes."""
-    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", name or "").lower()
+    spaced = _space_pascal_name(name or "")
     combined = f"{spaced} {description or ''}".lower()
+    if _is_instruction_like_actor_name(name, description):
+        return True
     blocked_fragments = {
         "landline", "sms", "query", "snippet", "excerpt", "source notes",
         "external research packet", "no readable excerpt", "generated at",
         "background context", "mixed mode", "online 400", "direction actor",
         "simulate a", "forecast vote", "produce numeric", "build relevant",
         "using actor", "uncertainty build", "expert blog analysis",
+        "then explain", "agent disagreement", "numeric forecasts",
+        "using actor", "may actor", "run actor", "output actor", "assembly actor",
+        "bengal actor", "boom baseline", "crash and inventory correction",
+        "current state snapshot", "response pocket", "shock pocket",
+        "scenario synthesis pocket", "target variable", "required output",
     }
     if any(fragment in combined for fragment in blocked_fragments):
         return True
     words = [word for word in re.findall(r"[a-z0-9]+", spaced) if word]
     if not words:
+        return True
+    if len(words) >= 5 and set(words) & NON_ACTOR_SENTENCE_WORDS:
+        return True
+    if any(phrase in spaced for phrase in PROCESS_OR_PARAMETER_ROLE_PHRASES):
+        return True
+    if set(words) <= NON_ACTOR_UNIT_OR_METRIC_WORDS:
+        return True
+    if "actor" in words and any(word in NON_ACTOR_UNIT_OR_METRIC_WORDS for word in words) and not any(word in ACTOR_WORDS - {"actor", "actors", "agent", "agents"} for word in words):
         return True
     if "actor" in words and not any(word in ACTOR_WORDS - {"actor", "actors", "agent", "agents"} for word in words):
         return True
@@ -302,13 +418,48 @@ def _actor_items_from_text(text: str, limit: int = 18) -> List[Tuple[str, str]]:
     candidates: List[str] = []
     source_text = (text or "").replace("U.S.", "US").replace("U.K.", "UK")
 
+    # If the user asks for metrics by named stakeholder/group, keep those names
+    # as actors too. This is generic: it reads labels from target rows such as
+    # "X vote share and seats" or "probability of X majority".
+    metric_label_patterns = [
+        r"^\s*(?:[-*•]|\d{1,3}[.)])\s*([A-Za-z][A-Za-z0-9&/ .'-]{1,60}?)\s+(?:vote\s+share|seat\s+share|seats?)\b",
+        r"\bprobability\s+(?:of\s+)?([A-Za-z][A-Za-z0-9&/ .'-]{1,50}?)\s+(?:majority|win|wins|crosses|exceeds|above|below)\b",
+    ]
+    for pattern in metric_label_patterns:
+        for match in re.finditer(pattern, source_text, flags=re.IGNORECASE | re.MULTILINE):
+            label = re.sub(r"\b(?:overall|statewide|regional|minority|women|youth|turnout|hung|assembly)\b", " ", match.group(1), flags=re.IGNORECASE)
+            label = re.sub(r"\s+", " ", label).strip(" .,:;-")
+            if label.lower().startswith(("probability", "chance")):
+                continue
+            if label and 2 <= len(label) <= 60:
+                candidates.append(label)
+
     for pattern in [
         r"(?:considering|using|involving|include|includes|including|with)\s+([^.;\n]+)",
         r"(?:driven by|impacted by|affected by)\s+([^.;\n]+)",
     ]:
         for match in re.finditer(pattern, source_text, flags=re.IGNORECASE):
-            for item in re.split(r",|;|\n|\band\b", match.group(1), flags=re.IGNORECASE):
+            segment = match.group(1)
+            if re.search(r"\bonly\s+information\s+available\b|\bavailable\s+(?:up\s+)?to\b", segment, flags=re.IGNORECASE):
+                if re.search(r"\bconsidering\b", segment, flags=re.IGNORECASE):
+                    segment = re.split(r"\bconsidering\b", segment, maxsplit=1, flags=re.IGNORECASE)[-1]
+                else:
+                    continue
+            for item in re.split(r",|;|\n|\band\b", segment, flags=re.IGNORECASE):
                 cleaned = re.sub(r"^[\s\-*•\d.)]+", "", item)
+                cleaned = re.sub(r"^\s*(?:a|an|the)\s+", "", cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(
+                    r"^(?:the\s+)?(?:simulation|model|prompt)\s+(?:should|must|can)\s+(?:consider|include|use|involve)\s+",
+                    "",
+                    cleaned,
+                    flags=re.IGNORECASE,
+                )
+                cleaned = re.sub(
+                    r"^(?:should|must|can)\s+(?:consider|include|use|involve)\s+",
+                    "",
+                    cleaned,
+                    flags=re.IGNORECASE,
+                )
                 cleaned = re.sub(r"^(?:include|includes|including|considering|with)\s+", "", cleaned, flags=re.IGNORECASE)
                 cleaned = re.split(r"\b(?:only if|if supported|when supported)\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
                 cleaned = re.sub(r"[^a-zA-Z0-9&/ _.'-]+", " ", cleaned)
@@ -319,6 +470,19 @@ def _actor_items_from_text(text: str, limit: int = 18) -> List[Tuple[str, str]]:
     listish = re.split(r",|;|\n|\band\b", source_text, flags=re.IGNORECASE)
     for raw in listish:
         cleaned = re.sub(r"^[\s\-*•\d.)]+", "", raw)
+        cleaned = re.sub(r"^\s*(?:a|an|the)\s+", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"^(?:the\s+)?(?:simulation|model|prompt)\s+(?:should|must|can)\s+(?:consider|include|use|involve)\s+",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^(?:should|must|can)\s+(?:consider|include|use|involve)\s+",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         cleaned = re.sub(r"^(?:include|includes|including|considering|with)\s+", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.split(r"\b(?:only if|if supported|when supported)\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
         if ":" in cleaned or "=" in cleaned:
@@ -341,12 +505,30 @@ def _actor_items_from_text(text: str, limit: int = 18) -> List[Tuple[str, str]]:
         if _looks_like_named_actor(phrase, source_text):
             candidates.append(phrase)
 
+    lowered_text = source_text.lower()
+    cohort_rules = [
+        (r"\bwomen\b|\bfemale\b", "Women Voters" if "voter" in lowered_text or "election" in lowered_text else "Women Participants"),
+        (r"\bminority\b|\bminorities\b|\bcommunity\b|\bcommunities\b", "Minority Or Community Participants"),
+        (r"\byouth\b|\bstudent\b|\bunemployment\b|\bjobs?\b", "Youth Or Employment-Exposed Participants"),
+        (r"\brural\b|\bpoor\b|\bwelfare\b|\bbeneficiar", "Rural Or Welfare-Exposed Participants"),
+        (r"\burban\b|\bmiddle[- ]class\b|\bcivic\b", "Urban Middle-Class Participants"),
+        (r"\bworker\b|\blabor\b|\blabour\b|\bunion\b", "Workers Or Labor Participants"),
+        (r"\bconsumer\b|\bdemand\b|\bhousehold\b", "Consumers Or Households"),
+        (r"\bbusiness\b|\bindustry\b|\bfirm\b|\bcompany\b", "Business Or Industry Participants"),
+        (r"\bregion\b|\bregional\b|\bswing\b", "Regional Signal Observers"),
+    ]
+    for pattern, label in cohort_rules:
+        if re.search(pattern, lowered_text):
+            candidates.append(label)
+
     results: List[Tuple[str, str]] = []
     seen = set()
     for phrase in candidates:
         phrase = re.sub(r"\s+", " ", phrase).strip()
         lowered = phrase.lower()
         if lowered in seen or any(stop in lowered for stop in NON_ACTOR_PHRASES):
+            continue
+        if any(phrase_stop in lowered for phrase_stop in PROCESS_OR_PARAMETER_ROLE_PHRASES):
             continue
         entity_name = _to_pascal_case(phrase)
         if not entity_name or entity_name in {"Person", "Organization", "Unknown"}:
@@ -371,6 +553,10 @@ def _looks_like_actor_phrase(phrase: str) -> bool:
         return False
     if any(stop in " ".join(words) for stop in NON_ACTOR_PHRASES):
         return False
+    if set(words) & NON_ACTOR_SENTENCE_WORDS:
+        return False
+    if set(words) <= NON_ACTOR_UNIT_OR_METRIC_WORDS:
+        return False
     return any(word in ACTOR_WORDS for word in words)
 
 
@@ -380,8 +566,11 @@ def _looks_like_named_actor(phrase: str, full_text: str) -> bool:
         return False
     if lowered in {"horizon xl", "source notes", "external research packet"}:
         return False
-    if re.fullmatch(r"[A-Z]{3,8}(?:\([A-Z]+\))?", phrase):
-        return True
+    if lowered in NON_ACTOR_UNIT_OR_METRIC_WORDS:
+        return False
+    words = re.findall(r"[A-Za-z0-9]+", phrase)
+    if len(words) == 1 and words[0].lower() not in ACTOR_WORDS and not re.fullmatch(r"[A-Z]{3,8}(?:\([A-Z]+\))?", phrase):
+        return False
     window_pattern = re.escape(phrase)
     match = re.search(window_pattern, full_text or "")
     if not match:
@@ -389,6 +578,8 @@ def _looks_like_named_actor(phrase: str, full_text: str) -> bool:
     start = max(0, match.start() - 80)
     end = min(len(full_text), match.end() + 80)
     window = full_text[start:end].lower()
+    if re.fullmatch(r"[A-Z]{3,8}(?:\([A-Z]+\))?", phrase):
+        return any(word in window for word in ACTOR_WORDS) or any(term in window for term in ["strength", "risk", "advantage", "response", "discipline", "policy", "supply"])
     return any(word in window for word in ACTOR_WORDS)
 
 
@@ -400,8 +591,29 @@ def _select_run_agent_types(
     """Keep central prompt actors but rotate secondary roles per fresh run."""
     if len(agents) <= limit:
         return agents
-    anchors = agents[:2]
-    pool = agents[2:]
+    def score(agent: Tuple[str, str]) -> int:
+        name, description = agent
+        spaced = _space_pascal_name(name)
+        combined = f"{spaced} {description or ''}".lower()
+        value = 0
+        if re.search(r"\b[A-Z]{2,8}\b", description or ""):
+            value += 8
+        for term in [
+            "party", "strategist", "voter", "voters", "bloc", "minority", "women",
+            "youth", "rural", "urban", "worker", "labor", "labour", "consumer",
+            "poll", "data", "research", "quant", "media", "watchdog", "business",
+            "industry", "government", "regulator", "candidate", "campaign",
+        ]:
+            if term in combined:
+                value += 2
+        if any(fragment in combined for fragment in [" using.", " may.", " run.", " output.", " assembly.", " bengal."]):
+            value -= 8
+        return value
+
+    ranked = sorted(enumerate(agents), key=lambda pair: (-score(pair[1]), pair[0]))
+    anchors = [agent for _, agent in ranked[: max(3, min(8, limit // 2))]]
+    anchor_names = {name for name, _ in anchors}
+    pool = [agent for agent in agents if agent[0] not in anchor_names]
     rng = random.Random(generation_seed or random.random())
     rng.shuffle(pool)
     return anchors + pool[: max(0, limit - len(anchors))]
@@ -426,11 +638,11 @@ def _target_entity_count(explicit_count: int, inferred_count: int, text: str) ->
     """Choose ontology size from explicit prompt scope, with generous safety bounds."""
     if explicit_count:
         # Preserve every explicitly requested agent, then add orchestration roles
-        # and small generic fallbacks without squeezing prompt actors out.
-        base = explicit_count + len(CONTROL_ENTITY_TYPES) + 2
+        # and context-derived named actors without squeezing prompt actors out.
+        base = max(explicit_count, inferred_count) + len(CONTROL_ENTITY_TYPES) + 2
     else:
         scope = _prompt_scope_score(text)
-        base = max(8, min(18, 8 + scope // 4, inferred_count + len(CONTROL_ENTITY_TYPES)))
+        base = max(12, min(30, 12 + scope // 2, inferred_count + len(CONTROL_ENTITY_TYPES) + 2))
     return max(6, min(48, base))
 
 
@@ -441,11 +653,19 @@ def _target_edge_count(entity_count: int, relationship_count: int, text: str) ->
     return max(8, min(96, base))
 
 
-def _agent_role(name: str) -> str:
+def _agent_role(name: str, context_text: str = "") -> str:
     """Classify an agent/entity name into a broad role for relationship design."""
     lowered = re.sub(r"([a-z])([A-Z])", r"\1 \2", name).lower()
-    if any(term in lowered for term in ["strategist", "campaign", "party", "candidate"]):
+    election_like = _is_election_context(context_text)
+    narrative_like = _is_narrative_context(context_text)
+    if election_like and any(term in lowered for term in ["strategist", "campaign", "party", "candidate"]):
         return "campaign"
+    if narrative_like and any(term in lowered for term in [
+        "strategist", "faction", "court", "regime", "military", "naval", "magic",
+        "occult", "watch", "company", "militant", "king", "queen", "lord",
+        "advisor", "claimant", "dynasty", "prophecy", "dragon", "throne",
+    ]):
+        return "power_actor"
     if any(term in lowered for term in ["voter", "beneficiary", "rural", "urban", "minority", "youth", "worker", "consumer", "public", "household"]):
         return "constituency"
     if any(term in lowered for term in ["pollster", "data scientist", "data", "quant", "model"]):
@@ -467,15 +687,18 @@ def _edge(name: str, description: str, source: str, target: str) -> Tuple[str, s
     return (name.upper(), _safe_description(description, description), _to_pascal_case(source), _to_pascal_case(target))
 
 
-def _relationship_edges_for_agents(agents: List[Tuple[str, str]]) -> List[Tuple[str, str, str, str]]:
+def _relationship_edges_for_agents(agents: List[Tuple[str, str]], context_text: str = "") -> List[Tuple[str, str, str, str]]:
     """Create role-aware relationships from explicit/context-derived agents.
 
     This stays domain-general: it uses role words from the prompt-derived agent
     names instead of any pre-baked domain roster.
     """
     names = [_to_pascal_case(name) for name, _ in agents]
-    roles = {name: _agent_role(name) for name in names}
+    election_like = _is_election_context(context_text)
+    narrative_like = _is_narrative_context(context_text)
+    roles = {name: _agent_role(name, context_text) for name in names}
     campaigns = [name for name, role in roles.items() if role == "campaign"]
+    power_actors = [name for name, role in roles.items() if role == "power_actor"]
     constituencies = [name for name, role in roles.items() if role == "constituency"]
     data_agents = [name for name, role in roles.items() if role == "data"]
     narrative_agents = [name for name, role in roles.items() if role == "narrative"]
@@ -485,16 +708,32 @@ def _relationship_edges_for_agents(agents: List[Tuple[str, str]]) -> List[Tuple[
 
     edges: List[Tuple[str, str, str, str]] = []
 
-    for source in campaigns[:4]:
-        for target in constituencies[:6]:
-            edges.append(_edge("TARGETS_AND_MOBILIZES", "Campaign actor targets or mobilizes this participant bloc.", source, target))
+    if election_like:
+        for source in campaigns[:4]:
+            for target in constituencies[:6]:
+                edges.append(_edge("TARGETS_AND_MOBILIZES", "Campaign actor targets or mobilizes this participant bloc.", source, target))
 
-    for idx, source in enumerate(campaigns[:4]):
-        for target in campaigns[idx + 1:4]:
-            edges.append(_edge("CONTESTS_ELECTORAL_SPACE", "Competes with another actor over support, seats, resources, or legitimacy.", source, target))
+        for idx, source in enumerate(campaigns[:4]):
+            for target in campaigns[idx + 1:4]:
+                edges.append(_edge("CONTESTS_ELECTORAL_SPACE", "Competes with another actor over support, seats, resources, or legitimacy.", source, target))
+    elif narrative_like:
+        for idx, source in enumerate(power_actors[:8]):
+            for target in power_actors[idx + 1:8]:
+                edges.append(_edge("CONTESTS_POWER_AND_LEGITIMACY", "Competes over power, legitimacy, survival, alliances, or narrative outcomes.", source, target))
+        for source in narrative_agents[:4]:
+            for target in power_actors[:6]:
+                edges.append(_edge("INTERPRETS_STORY_CAUSALITY", "Interprets foreshadowing, motives, risks, and story consequences for this actor.", source, target))
+        for source in ground_agents[:4]:
+            for target in power_actors[:4]:
+                edges.append(_edge("CREATES_STORY_PRESSURE_FOR", "Ground-level pressure changes the actor's options or legitimacy.", source, target))
+    else:
+        contest_pool = (campaigns + power_actors + economic_agents + negotiators)[:8]
+        for idx, source in enumerate(contest_pool):
+            for target in contest_pool[idx + 1:8]:
+                edges.append(_edge("CONTESTS_POWER_OR_RESOURCES", "Competes with another actor over resources, authority, market share, legitimacy, or options.", source, target))
 
     for source in negotiators[:3]:
-        for target in campaigns[:4]:
+        for target in (campaigns if election_like else (power_actors + economic_agents + constituencies))[:4]:
             if source != target:
                 edges.append(_edge("NEGOTIATES_ALIGNMENT", "Negotiates alliance, coordination, or vote-transfer assumptions.", source, target))
 
@@ -673,20 +912,36 @@ class OntologyGenerator:
         )
 
         try:
-            result = self.llm_client.chat_json(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                temperature=0.7,
-                max_tokens=4096,
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(
+                    self.llm_client.chat_json,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                    temperature=0.7,
+                    max_tokens=4096,
+                )
+                result = future.result(timeout=Config.ONTOLOGY_LLM_TIMEOUT_SECONDS)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        except FutureTimeoutError:
+            logger.warning(
+                "Ontology LLM timed out after %.1fs; using context-derived fallback.",
+                Config.ONTOLOGY_LLM_TIMEOUT_SECONDS,
             )
+            result = self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed)
         except Exception as exc:
             logger.warning("Ontology LLM generation failed; using context-derived fallback: %s", exc)
             result = self._fallback_ontology(simulation_requirement, document_texts, additional_context, generation_seed)
 
         full_text = "\n".join([simulation_requirement or "", additional_context or "", "\n".join(document_texts or [])])
-        explicit_agents = _extract_explicit_agent_types(full_text)
+        primary_text = "\n".join([simulation_requirement or "", additional_context or ""]).strip()
+        explicit_agents = (
+            _extract_explicit_agent_types(primary_text)
+            or _extract_explicit_agent_types(_without_external_research(full_text))
+        )
         processed = self._validate_and_process(result, explicit_agents=explicit_agents, source_text=full_text)
         if self._looks_like_stale_default(processed, simulation_requirement, document_texts, additional_context, explicit_agents=explicit_agents):
             logger.warning("Ontology output looked stale or weak; using context-derived fallback.")
@@ -790,13 +1045,18 @@ For repeated prompts, vary secondary observers and personas while preserving cor
         # Web research can inform evidence later, but search snippets should not
         # become agents just because a search-result page mentioned a metric.
         explicit_agents = _extract_explicit_agent_types(primary_text) or _extract_explicit_agent_types(non_research_text)
-        inferred_agents = explicit_agents or _quality_actor_items(primary_text)
+        context_agents = _quality_actor_items(primary_text, limit=30) or _quality_actor_items(non_research_text, limit=30)
+        inferred_agents = _dedupe_agent_tuples((explicit_agents or []) + context_agents)
         if not inferred_agents:
             inferred_agents = _quality_actor_items(non_research_text)
         if explicit_agents:
             inferred_agents = _dedupe_agent_tuples(inferred_agents)
         else:
-            inferred_agents = _select_run_agent_types(inferred_agents, generation_seed, limit=8)
+            inferred_agents = _select_run_agent_types(
+                inferred_agents,
+                generation_seed,
+                limit=max(12, min(28, 10 + _prompt_scope_score(primary_text or non_research_text) // 2)),
+            )
 
         if not inferred_agents:
             inferred_agents = list(GENERIC_FALLBACK_ACTORS)
@@ -805,7 +1065,7 @@ For repeated prompts, vary secondary observers and personas while preserving cor
             ("Person", "Any individual person not fitting another specific type."),
             ("Organization", "Any organization not fitting another specific type."),
         ]
-        edge_types = _relationship_edges_for_agents(inferred_agents)
+        edge_types = _relationship_edges_for_agents(inferred_agents, full_text)
         summary = f"Context-derived fallback ontology for {_context_label(full_text)}."
         return self._build_ontology_payload(entity_types, edge_types, summary)
 
@@ -823,6 +1083,8 @@ For repeated prompts, vary secondary observers and personas while preserving cor
 
         explicit_agents = explicit_agents or []
         explicit_names = [_to_pascal_case(name) for name, _ in explicit_agents]
+        explicit_name_set = set(explicit_names)
+        actor_source_text = _without_external_research(source_text)
 
         entity_name_map: Dict[str, str] = {}
         normalized_entities = []
@@ -832,6 +1094,8 @@ For repeated prompts, vary secondary observers and personas while preserving cor
             original = str(entity.get("name") or "Unknown")
             name = _to_pascal_case(original)
             description = _safe_description(entity.get("description", ""), f"{name} actor.")
+            if explicit_name_set and name not in explicit_name_set and name not in {"Person", "Organization"}:
+                continue
             if _is_low_quality_entity_name(name, description):
                 continue
             entity_name_map[original] = name
@@ -843,7 +1107,9 @@ For repeated prompts, vary secondary observers and personas while preserving cor
             })
 
         existing_names = {entity["name"] for entity in normalized_entities}
-        for name, description in explicit_agents:
+        inferred_supplements = [] if explicit_agents else _quality_actor_items(actor_source_text, limit=30)
+        supplemental_agents = _dedupe_agent_tuples((explicit_agents or []) + inferred_supplements)
+        for name, description in supplemental_agents:
             normalized_name = _to_pascal_case(name)
             if normalized_name not in existing_names:
                 normalized_entities.append(_entity(normalized_name, description))
@@ -868,7 +1134,7 @@ For repeated prompts, vary secondary observers and personas while preserving cor
             })
 
         if explicit_agents:
-            explicit_edges = self._normalize_edge_tuples(_relationship_edges_for_agents(explicit_agents))
+            explicit_edges = self._normalize_edge_tuples(_relationship_edges_for_agents(explicit_agents, actor_source_text))
             existing_edge_keys = {
                 (edge["name"], tuple((st["source"], st["target"]) for st in edge["source_targets"]))
                 for edge in normalized_edges
@@ -879,7 +1145,7 @@ For repeated prompts, vary secondary observers and personas while preserving cor
                     normalized_edges.append(edge)
                     existing_edge_keys.add(key)
 
-        input_text = source_text or "\n".join([str(result.get("analysis_summary") or ""), " ".join(explicit_names)])
+        input_text = actor_source_text or "\n".join([str(result.get("analysis_summary") or ""), " ".join(explicit_names)])
         max_entities = _target_entity_count(len(explicit_names), len(normalized_entities), input_text)
         max_edges = _target_edge_count(max_entities, len(normalized_edges), input_text)
         result["entity_types"] = _ensure_control_entities(normalized_entities, max_entities)

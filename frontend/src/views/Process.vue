@@ -414,8 +414,8 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
-import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
+import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, resetProject } from '../api/graph'
+import { getPendingUpload, clearPendingUpload, getLastPrompt } from '../store/pendingUpload'
 import BrandMark from '../components/BrandMark.vue'
 import * as d3 from 'd3'
 
@@ -447,6 +447,7 @@ const graphSvg = ref(null)
 
 // 轮询定时器
 let pollTimer = null
+let staleTaskRecoveryAttempted = false
 
 // 计算属性
 const statusClass = computed(() => {
@@ -572,9 +573,16 @@ const initProject = async () => {
 // 处理新建项目 - 调用 ontology/generate API
 const handleNewProject = async () => {
   const pending = getPendingUpload()
-  
-  if (!pending.isPending) {
-    error.value = '没有待处理的项目输入，请返回首页重新操作'
+  const queryPrompt = Array.isArray(route.query.prompt) ? route.query.prompt[0] : route.query.prompt
+  const simulationRequirement = String(
+    pending.simulationRequirement
+    || queryPrompt
+    || getLastPrompt()
+    || ''
+  ).trim()
+
+  if (!simulationRequirement) {
+    error.value = 'No simulation prompt was available. Please return home and enter a prompt.'
     loading.value = false
     return
   }
@@ -591,7 +599,7 @@ const handleNewProject = async () => {
         formDataObj.append('files', file)
       })
     }
-    formDataObj.append('simulation_requirement', pending.simulationRequirement)
+    formDataObj.append('simulation_requirement', simulationRequirement)
     
     // 调用本体生成 API
     const response = await generateOntology(formDataObj)
@@ -839,6 +847,18 @@ const pollTaskStatus = async (taskId) => {
       }
     }
   } catch (err) {
+    if (err?.response?.status === 404 && !staleTaskRecoveryAttempted) {
+      staleTaskRecoveryAttempted = true
+      console.warn('Graph task was stale. Rebuilding local graph...')
+      stopPolling()
+      stopGraphPolling()
+      const reset = await resetProject(currentProjectId.value)
+      if (reset.success) {
+        projectData.value = reset.data
+        await startBuildGraph()
+        return
+      }
+    }
     console.error('Poll task error:', err)
   }
 }

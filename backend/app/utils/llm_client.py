@@ -18,7 +18,8 @@ class LLMClient:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        timeout: Optional[float] = None
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
@@ -30,7 +31,7 @@ class LLMClient:
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
-            timeout=90,
+            timeout=timeout or Config.LLM_TIMEOUT_SECONDS,
         )
 
     def _normalize_temperature(self, temperature: float) -> float:

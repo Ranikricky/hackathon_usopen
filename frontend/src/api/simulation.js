@@ -77,6 +77,55 @@ export const listSimulations = (projectId) => {
 }
 
 /**
+ * Create a structured domain simulation plan.
+ * @param {Object} data - { project_id?, prompt?, include_external_research? }
+ */
+export const planStructuredSimulation = (data) => {
+  return requestWithRetry(() => service.post('/api/simulation/plan', data), 2, 1000)
+}
+
+/**
+ * Generate Horizon XL structured agents from a domain plan.
+ * @param {Object} data - { project_id?, domain_plan?, prompt?, evidence_summary?, use_llm? }
+ */
+export const generateStructuredAgents = (data) => {
+  return requestWithRetry(() => service.post('/api/simulation/generate-agents', data), 2, 1000)
+}
+
+/**
+ * Run the structured time-pocket simulation engine.
+ * @param {Object} data - { project_id?, graph_id?, simulation_id?, prompt?, domain_plan?, agents? }
+ */
+export const runStructuredSimulation = (data) => {
+  return requestWithRetry(() => service.post('/api/simulation/run-structured', data), 2, 1000)
+}
+
+/**
+ * Fetch the structured simulation state.
+ * @param {string} simulationId
+ */
+export const getStructuredSimulationState = (simulationId) => {
+  return service.get(`/api/simulation/state/${simulationId}`)
+}
+
+/**
+ * Validate structured simulation state.
+ * @param {string} simulationId
+ */
+export const getStructuredValidation = (simulationId) => {
+  return service.get(`/api/simulation/validation/${simulationId}`)
+}
+
+/**
+ * Fetch structured debate transcript.
+ * @param {string} simulationId
+ * @param {Object} params - { format?: 'json' | 'markdown' | 'text', download?: boolean }
+ */
+export const getStructuredTranscript = (simulationId, params = {}) => {
+  return service.get(`/api/simulation/transcript/${simulationId}`, { params })
+}
+
+/**
  * 启动模拟
  * @param {Object} data - { simulation_id, platform?, max_rounds?, enable_graph_memory_update? }
  */
@@ -101,11 +150,12 @@ export const getRunStatus = (simulationId) => {
 }
 
 /**
- * 获取模拟运行详细状态（包含最近动作）
+ * 获取模拟运行详细状态
  * @param {string} simulationId
+ * @param {Object} params - 查询参数，如 platform/include_all/action_limit/recent_limit
  */
-export const getRunStatusDetail = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}/run-status/detail`)
+export const getRunStatusDetail = (simulationId, params = {}) => {
+  return service.get(`/api/simulation/${simulationId}/run-status/detail`, { params })
 }
 
 /**
@@ -184,4 +234,3 @@ export const interviewAgents = (data) => {
 export const getSimulationHistory = (limit = 20) => {
   return service.get('/api/simulation/history', { params: { limit } })
 }
-

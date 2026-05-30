@@ -393,7 +393,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { getAgentLog, getConsoleLog } from '../api/report'
+import { getAgentLog, getConsoleLog, getReport } from '../api/report'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -2020,6 +2020,56 @@ const getLogLevelClass = (log) => {
 // Polling
 let agentLogTimer = null
 let consoleLogTimer = null
+let initializedReportId = ''
+
+const hydrateCompletedReport = (reportData) => {
+  const report = reportData?.data || reportData
+  if (!report || report.status !== 'completed') return false
+
+  if (report.outline) {
+    reportOutline.value = report.outline
+    const sections = report.outline.sections || []
+    const sectionMap = {}
+    sections.forEach((section, idx) => {
+      sectionMap[idx + 1] = section.content || ''
+    })
+    generatedSections.value = sectionMap
+    expandedContent.value = new Set(sections.map((_, idx) => idx))
+  } else if (report.markdown_content) {
+    reportOutline.value = {
+      title: 'Structured Forecast Report',
+      summary: 'Loaded from completed report markdown.',
+      sections: [
+        {
+          title: 'Full Report',
+          content: report.markdown_content,
+        }
+      ]
+    }
+    generatedSections.value = { 1: report.markdown_content }
+    expandedContent.value = new Set([0])
+  }
+
+  isComplete.value = true
+  currentSectionIndex.value = null
+  emit('update-status', 'completed')
+  stopPolling()
+  return true
+}
+
+const loadCompletedReport = async () => {
+  if (!props.reportId) return false
+  try {
+    const res = await getReport(props.reportId)
+    if (res.success && hydrateCompletedReport(res.data)) {
+      addLog(`Loaded completed report: ${props.reportId}`)
+      return true
+    }
+  } catch (err) {
+    console.warn('Completed report lookup failed:', err)
+  }
+  return false
+}
 
 const fetchAgentLog = async () => {
   if (!props.reportId) return
@@ -2177,18 +2227,18 @@ const stopPolling = () => {
 
 // Lifecycle
 onMounted(() => {
-  if (props.reportId) {
-    addLog(`Report Agent initialized: ${props.reportId}`)
-    startPolling()
-  }
+  // Initialization is handled by the reportId watcher below.
 })
 
 onUnmounted(() => {
   stopPolling()
 })
 
-watch(() => props.reportId, (newId) => {
+watch(() => props.reportId, async (newId) => {
   if (newId) {
+    if (initializedReportId === newId) return
+    initializedReportId = newId
+    stopPolling()
     agentLogs.value = []
     consoleLogs.value = []
     agentLogLine.value = 0
@@ -2201,8 +2251,12 @@ watch(() => props.reportId, (newId) => {
     collapsedSections.value = new Set()
     isComplete.value = false
     startTime.value = null
-    
-    startPolling()
+
+    addLog(`Report Agent initialized: ${newId}`)
+    const loaded = await loadCompletedReport()
+    if (!loaded) {
+      startPolling()
+    }
   }
 }, { immediate: true })
 </script>

@@ -4,6 +4,7 @@ Horizon XL Backend - Flask app factory.
 
 import os
 import warnings
+from urllib.parse import urlparse
 
 # Suppress multiprocessing resource_tracker warnings from third-party libraries.
 # This must be configured before other imports.
@@ -71,10 +72,11 @@ def create_app(config_class=Config):
         return response
     
     # Register blueprints.
-    from .api import graph_bp, simulation_bp, report_bp
+    from .api import graph_bp, simulation_bp, report_bp, outputs_bp
     app.register_blueprint(graph_bp, url_prefix='/api/graph')
     app.register_blueprint(simulation_bp, url_prefix='/api/simulation')
     app.register_blueprint(report_bp, url_prefix='/api/report')
+    app.register_blueprint(outputs_bp, url_prefix='/api/outputs')
     
     # Health check.
     @app.route('/health')
@@ -97,6 +99,39 @@ def create_app(config_class=Config):
                         else 'local_ephemeral'
                     )
                 }
+            }
+        }
+
+    @app.route('/api/runtime/status')
+    def runtime_status():
+        """Expose non-secret runtime configuration for deployment debugging."""
+        config_warnings = Config.validate()
+        durable_status = DurableStore.provider_status()
+        return {
+            'success': True,
+            'data': {
+                'service': 'Horizon XL Backend',
+                'ready': not config_warnings,
+                'warnings': config_warnings,
+                'llm': {
+                    'api_key_set': bool(Config.LLM_API_KEY),
+                    'base_url_domain': urlparse(Config.LLM_BASE_URL or '').netloc,
+                    'model': Config.LLM_MODEL_NAME,
+                },
+                'zep': {
+                    'api_key_set': bool(Config.ZEP_API_KEY),
+                    'note': 'Configured means a key exists; use graph/entity calls to verify authorization.',
+                },
+                'storage': {
+                    'providers': durable_status,
+                    'durable_enabled': DurableStore.enabled(),
+                    'active_provider': 'git' if durable_status.get('git') else 'local_ephemeral',
+                },
+                'external_research': {
+                    'enabled': Config.EXTERNAL_RESEARCH_ENABLED,
+                    'max_queries': Config.EXTERNAL_RESEARCH_MAX_QUERIES,
+                    'max_results': Config.EXTERNAL_RESEARCH_MAX_RESULTS,
+                },
             }
         }
 

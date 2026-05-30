@@ -42,6 +42,13 @@ class Project:
     analysis_summary: Optional[str] = None
     generation_seed: Optional[str] = None
     external_research: Optional[Dict[str, Any]] = None
+    domain_contract: Optional[Dict[str, Any]] = None
+    evidence: List[Dict[str, Any]] = field(default_factory=list)
+    instructions: List[str] = field(default_factory=list)
+    targets: List[Dict[str, Any]] = field(default_factory=list)
+    actors: List[Dict[str, Any]] = field(default_factory=list)
+    output_requirements: List[Any] = field(default_factory=list)
+    rejected_prompt_fragments: List[Dict[str, Any]] = field(default_factory=list)
     
     # 图谱信息（接口2完成后填充）
     graph_id: Optional[str] = None
@@ -69,6 +76,13 @@ class Project:
             "analysis_summary": self.analysis_summary,
             "generation_seed": self.generation_seed,
             "external_research": self.external_research,
+            "domain_contract": self.domain_contract,
+            "evidence": self.evidence,
+            "instructions": self.instructions,
+            "targets": self.targets,
+            "actors": self.actors,
+            "output_requirements": self.output_requirements,
+            "rejected_prompt_fragments": self.rejected_prompt_fragments,
             "graph_id": self.graph_id,
             "graph_build_task_id": self.graph_build_task_id,
             "simulation_requirement": self.simulation_requirement,
@@ -96,6 +110,13 @@ class Project:
             analysis_summary=data.get('analysis_summary'),
             generation_seed=data.get('generation_seed'),
             external_research=data.get('external_research'),
+            domain_contract=data.get('domain_contract'),
+            evidence=data.get('evidence') or [],
+            instructions=data.get('instructions') or [],
+            targets=data.get('targets') or [],
+            actors=data.get('actors') or [],
+            output_requirements=data.get('output_requirements') or [],
+            rejected_prompt_fragments=data.get('rejected_prompt_fragments') or [],
             graph_id=data.get('graph_id'),
             graph_build_task_id=data.get('graph_build_task_id'),
             simulation_requirement=data.get('simulation_requirement'),
@@ -166,6 +187,16 @@ class ProjectManager:
         return os.path.join(cls._get_project_dir(project_id), 'external_research.json')
 
     @classmethod
+    def _get_project_domain_contract_path(cls, project_id: str) -> str:
+        """获取项目 Domain Contract 路径"""
+        return os.path.join(cls._get_project_dir(project_id), 'domain_contract.json')
+
+    @classmethod
+    def _get_project_prompt_parse_path(cls, project_id: str) -> str:
+        """获取项目 prompt parse artifact 路径"""
+        return os.path.join(cls._get_project_dir(project_id), 'prompt_parse.json')
+
+    @classmethod
     def _get_project_local_graph_path(cls, project_id: str) -> str:
         """获取项目本地图谱数据路径"""
         return os.path.join(cls._get_project_dir(project_id), 'local_graph.json')
@@ -226,6 +257,53 @@ class ProjectManager:
         os.makedirs(project_dir, exist_ok=True)
         cls._safe_write_json(cls._get_project_research_path(project_id), research)
         DurableStore.set_json(cls._store_key("external_research", project_id), research)
+
+    @classmethod
+    def save_domain_contract(cls, project_id: str, contract: Dict[str, Any]) -> None:
+        """Persist the approved/pre-approval Domain Contract and prompt buckets."""
+        project = cls.get_project(project_id)
+        if not project:
+            return
+
+        project.domain_contract = contract or {}
+        project.evidence = list((contract or {}).get("evidence") or [])
+        project.instructions = list((contract or {}).get("instructions") or [])
+        project.targets = list((contract or {}).get("targets") or [])
+        project.actors = list((contract or {}).get("actors") or [])
+        project.output_requirements = list((contract or {}).get("output_requirements") or [])
+        project.rejected_prompt_fragments = list((contract or {}).get("rejected_prompt_fragments") or [])
+        cls.save_project(project)
+
+        prompt_parse = {
+            "evidence": project.evidence,
+            "instructions": project.instructions,
+            "targets": project.targets,
+            "actors": project.actors,
+            "output_requirements": project.output_requirements,
+            "rejected_prompt_fragments": project.rejected_prompt_fragments,
+        }
+        cls._safe_write_json(cls._get_project_domain_contract_path(project_id), contract or {})
+        cls._safe_write_json(cls._get_project_prompt_parse_path(project_id), prompt_parse)
+        DurableStore.set_json(cls._store_key("domain_contract", project_id), contract or {})
+        DurableStore.set_json(cls._store_key("prompt_parse", project_id), prompt_parse)
+
+    @classmethod
+    def get_domain_contract(cls, project_id: str) -> Optional[Dict[str, Any]]:
+        """Read the Domain Contract from project state/artifact/durable store."""
+        project = cls.get_project(project_id)
+        if project and isinstance(project.domain_contract, dict) and project.domain_contract:
+            return project.domain_contract
+
+        path = cls._get_project_domain_contract_path(project_id)
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
+        contract = DurableStore.get_json(cls._store_key("domain_contract", project_id))
+        if isinstance(contract, dict):
+            cls._safe_write_json(path, contract)
+            return contract
+        return None
 
     @classmethod
     def get_external_research(cls, project_id: str) -> Optional[Dict[str, Any]]:
@@ -318,6 +396,8 @@ class ProjectManager:
         if not os.path.exists(project_dir):
             deleted_remote = DurableStore.delete(cls._project_key(project_id))
             DurableStore.delete(cls._store_key("external_research", project_id))
+            DurableStore.delete(cls._store_key("domain_contract", project_id))
+            DurableStore.delete(cls._store_key("prompt_parse", project_id))
             DurableStore.delete(cls._store_key("extracted_text", project_id))
             DurableStore.delete(cls._store_key("local_graph", project_id))
             return deleted_remote
@@ -325,6 +405,8 @@ class ProjectManager:
         shutil.rmtree(project_dir)
         DurableStore.delete(cls._project_key(project_id))
         DurableStore.delete(cls._store_key("external_research", project_id))
+        DurableStore.delete(cls._store_key("domain_contract", project_id))
+        DurableStore.delete(cls._store_key("prompt_parse", project_id))
         DurableStore.delete(cls._store_key("extracted_text", project_id))
         DurableStore.delete(cls._store_key("local_graph", project_id))
         return True

@@ -60,17 +60,15 @@
           :graphData="graphData"
           :error="error"
           :systemLogs="systemLogs"
+          @approve-domain-contract="approveDomainContract"
           @next-step="handleNextStep"
           @retry="retryCurrentStep"
         />
-        <!-- Step 2: Environment Setup -->
-        <Step2EnvSetup
+        <!-- Step 2: Horizon XL Structured Workbench -->
+        <HorizonStructuredWorkbench
           v-else-if="currentStep === 2"
           :projectData="projectData"
           :graphData="graphData"
-          :systemLogs="systemLogs"
-          @go-back="handleGoBack"
-          @next-step="handleNextStep"
           @add-log="addLog"
         />
       </div>
@@ -84,9 +82,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
-import Step2EnvSetup from '../components/Step2EnvSetup.vue'
+import HorizonStructuredWorkbench from '../components/HorizonStructuredWorkbench.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, resetProject } from '../api/graph'
-import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
+import { planStructuredSimulation } from '../api/simulation'
+import { getPendingUpload, clearPendingUpload, getLastPrompt } from '../store/pendingUpload'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 import BrandMark from '../components/BrandMark.vue'
 
@@ -116,6 +115,7 @@ const systemLogs = ref([])
 // Polling timers
 let pollTimer = null
 let graphPollTimer = null
+let staleTaskRecoveryAttempted = false
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -146,6 +146,7 @@ const statusText = computed(() => {
   if (currentPhase.value >= 2) return 'Ready'
   if (currentPhase.value === 1) return 'Building Graph'
   if (currentPhase.value === 0) return 'Generating Ontology'
+  if (currentPhase.value === -1) return 'Reviewing Contract'
   return 'Initializing'
 })
 
@@ -239,31 +240,95 @@ const initProject = async () => {
 
 const handleNewProject = async () => {
   const pending = getPendingUpload()
-  if (!pending.isPending) {
-    error.value = 'No pending project input found.'
-    addLog('Error: No pending project input found for new project.')
+  const queryPrompt = Array.isArray(route.query.prompt) ? route.query.prompt[0] : route.query.prompt
+  const simulationRequirement = String(
+    pending.simulationRequirement
+    || queryPrompt
+    || getLastPrompt()
+    || ''
+  ).trim()
+  if (!simulationRequirement) {
+    error.value = 'No prompt was handed to Step 1. Returning to the input screen.'
+    addLog('Step 1 did not receive a simulation prompt; returning to input screen instead of calling backend.')
+    router.replace({ name: 'Home' })
     return
   }
   
   try {
     loading.value = true
+    currentPhase.value = -1
+    ontologyProgress.value = { message: 'Planning Domain Contract...' }
+    addLog('Planning Domain Contract before ontology generation...')
+
+    const res = await planStructuredSimulation({
+      prompt: simulationRequirement,
+      project_name: 'Horizon XL Simulation',
+      create_project: true,
+      persist: true,
+      approved: false,
+      include_external_research: true,
+    })
+    if (res.success) {
+      currentProjectId.value = res.data.project_id || res.data.domain_contract?.project_id
+      projectData.value = {
+        ...res.data,
+        project_id: currentProjectId.value,
+        status: 'created',
+        simulation_requirement: simulationRequirement,
+      }
+      router.replace({ name: 'Process', params: { projectId: res.data.project_id } })
+      ontologyProgress.value = null
+      addLog('Domain Contract ready. Review/approve it to build the signal map.')
+    } else {
+      error.value = res.error || 'Domain Contract planning failed'
+      addLog(`Error planning Domain Contract: ${error.value}`)
+    }
+  } catch (err) {
+    const msg = getApiErrorMessage(err, 'Domain Contract planning failed')
+    error.value = msg
+    addLog(`Exception in handleNewProject: ${msg}`)
+  } finally {
+    loading.value = false
+  }
+}
+
+const approveDomainContract = async () => {
+  const pending = getPendingUpload()
+  const simulationRequirement = String(
+    pending.simulationRequirement
+    || projectData.value?.simulation_requirement
+    || getLastPrompt()
+    || ''
+  ).trim()
+
+  if (!simulationRequirement || !currentProjectId.value) {
+    error.value = 'Domain Contract approval could not continue because the prompt or project is missing.'
+    return
+  }
+
+  try {
+    loading.value = true
     currentPhase.value = 0
-    ontologyProgress.value = { message: 'Preparing project input...' }
-    addLog('Starting ontology generation with pending project input...')
-    
+    ontologyProgress.value = { message: 'Generating ontology from approved Domain Contract...' }
+    addLog('Domain Contract approved. Generating ontology from approved contract...')
+
     const formData = new FormData()
     if (Array.isArray(pending.files)) {
       pending.files.forEach(f => formData.append('files', f))
     }
-    formData.append('simulation_requirement', pending.simulationRequirement)
-    
+    formData.append('project_id', currentProjectId.value)
+    formData.append('simulation_requirement', simulationRequirement)
+    if (projectData.value?.domain_contract) {
+      formData.append('domain_contract', JSON.stringify({
+        ...projectData.value.domain_contract,
+        approved: true,
+      }))
+    }
+
     const res = await generateOntology(formData)
     if (res.success) {
       clearPendingUpload()
-      currentProjectId.value = res.data.project_id
       projectData.value = res.data
-      
-      router.replace({ name: 'Process', params: { projectId: res.data.project_id } })
       ontologyProgress.value = null
       addLog(`Ontology generated successfully for project ${res.data.project_id}`)
       await startBuildGraph()
@@ -274,7 +339,7 @@ const handleNewProject = async () => {
   } catch (err) {
     const msg = getApiErrorMessage(err, 'Ontology generation failed')
     error.value = msg
-    addLog(`Exception in handleNewProject: ${msg}`)
+    addLog(`Exception in approveDomainContract: ${msg}`)
   } finally {
     loading.value = false
   }
@@ -290,7 +355,10 @@ const loadProject = async () => {
       updatePhaseByStatus(res.data.status, res.data.error)
       addLog(`Project loaded. Status: ${res.data.status}`)
       
-      if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
+      if (res.data.status === 'created' && res.data.domain_contract && !res.data.ontology) {
+        currentPhase.value = -1
+        addLog('Loaded saved Domain Contract awaiting approval.')
+      } else if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
         await startBuildGraph()
       } else if (res.data.status === 'graph_building' && res.data.graph_build_task_id) {
         currentPhase.value = 1
@@ -315,7 +383,7 @@ const loadProject = async () => {
 
 const updatePhaseByStatus = (status, projectError = '') => {
   switch (status) {
-    case 'created':
+    case 'created': currentPhase.value = projectData.value?.domain_contract && !projectData.value?.ontology ? -1 : 0; break;
     case 'ontology_generated': currentPhase.value = 0; break;
     case 'graph_building': currentPhase.value = 1; break;
     case 'graph_completed': currentPhase.value = 2; break;
@@ -407,6 +475,19 @@ const pollTaskStatus = async (taskId) => {
       }
     }
   } catch (e) {
+    const status = e?.response?.status
+    if (status === 404 && !staleTaskRecoveryAttempted) {
+      staleTaskRecoveryAttempted = true
+      addLog('Graph task was stale. Rebuilding local graph...')
+      stopPolling()
+      stopGraphPolling()
+      const reset = await resetProject(currentProjectId.value)
+      if (reset.success) {
+        projectData.value = reset.data
+        await startBuildGraph()
+        return
+      }
+    }
     console.error(e)
   }
 }
@@ -478,9 +559,10 @@ onUnmounted(() => {
 .app-header {
   height: 72px;
   border-bottom: 1px solid var(--hx-line);
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) auto minmax(300px, 1fr);
   align-items: center;
-  justify-content: space-between;
+  gap: 18px;
   padding: 0 26px;
   background: rgba(255,255,255,0.72);
   backdrop-filter: blur(22px) saturate(1.1);
@@ -490,9 +572,8 @@ onUnmounted(() => {
 }
 
 .header-center {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  justify-self: center;
+  min-width: 0;
 }
 
 .brand {
@@ -553,7 +634,9 @@ onUnmounted(() => {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  justify-self: end;
+  gap: 12px;
+  min-width: 0;
 }
 
 .workflow-step {
@@ -561,6 +644,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   font-size: 14px;
+  white-space: nowrap;
 }
 
 .step-num {
@@ -610,5 +694,21 @@ onUnmounted(() => {
 
 .panel-wrapper.left {
   border-right: 1px solid var(--hx-line);
+}
+
+@media (max-width: 1180px) {
+  .app-header {
+    grid-template-columns: auto 1fr auto;
+    padding: 0 16px;
+  }
+
+  .workflow-step,
+  .step-divider {
+    display: none;
+  }
+
+  .switch-btn {
+    padding: 7px 13px;
+  }
 }
 </style>

@@ -1,6 +1,75 @@
 <template>
   <div class="workbench-panel">
     <div class="scroll-container">
+      <!-- Step 00: Domain Contract Approval -->
+      <div class="step-card domain-contract-card" :class="{ 'active': currentPhase === -1, 'completed': currentPhase > -1 }">
+        <div class="card-header">
+          <div class="step-info">
+            <span class="step-num">00</span>
+            <span class="step-title">Domain Contract Approval</span>
+          </div>
+          <div class="step-status">
+            <span v-if="currentPhase > -1" class="badge success">Approved</span>
+            <span v-else class="badge processing">Review</span>
+          </div>
+        </div>
+
+        <div class="card-content">
+          <p class="api-note">POST /api/simulation/plan</p>
+          <p class="description">
+            The raw prompt is split into evidence, instructions, targets, actors, outputs, and rejected fragments before the graph is built.
+            This contract becomes the source of truth for ontology, graph, agents, simulation, validation, and reports.
+          </p>
+
+          <div v-if="domainContract" class="contract-grid">
+            <div class="contract-box hero-box">
+              <span class="box-label">Domain</span>
+              <strong>{{ humanize(domainContract.domain) }}</strong>
+              <small>{{ humanize(domainContract.engine_mode) }} · {{ humanize(domainContract.report_template) }}</small>
+            </div>
+            <div class="contract-box">
+              <span class="box-label">Targets</span>
+              <strong>{{ contractTargets.length }}</strong>
+              <small>{{ contractTargets.slice(0, 4).map(item => humanize(item.name)).join(', ') || 'No targets yet' }}</small>
+            </div>
+            <div class="contract-box">
+              <span class="box-label">Actors</span>
+              <strong>{{ contractActors.length }}</strong>
+              <small>{{ contractActors.slice(0, 4).map(item => item.name).join(', ') || 'No actors yet' }}</small>
+            </div>
+            <div class="contract-box">
+              <span class="box-label">Evidence</span>
+              <strong>{{ contractEvidence.length }}</strong>
+              <small>{{ contractInstructions.length }} instructions separated</small>
+            </div>
+          </div>
+
+          <div v-if="domainContract" class="contract-lanes">
+            <div class="lane">
+              <span class="lane-title">Evidence</span>
+              <p v-for="item in contractEvidence.slice(0, 3)" :key="item.text">{{ item.text }}</p>
+            </div>
+            <div class="lane">
+              <span class="lane-title">Rejected Fragments</span>
+              <p v-for="item in contractRejected.slice(0, 3)" :key="item.text">{{ item.text }}</p>
+            </div>
+            <div class="lane">
+              <span class="lane-title">Time Pockets</span>
+              <p v-for="item in contractTimePockets.slice(0, 3)" :key="item.pocket_id || item.label">{{ item.label || item.pocket_id || item.start }}</p>
+            </div>
+          </div>
+
+          <button
+            v-if="currentPhase === -1"
+            class="action-btn approve-contract-btn"
+            :disabled="!domainContract"
+            @click="$emit('approve-domain-contract')"
+          >
+            Approve contract and build signal map ➝
+          </button>
+        </div>
+      </div>
+
       <!-- Step 01: Ontology -->
       <div class="step-card" :class="{ 'active': currentPhase === 0, 'completed': currentPhase > 0 }">
         <div class="card-header">
@@ -202,18 +271,18 @@
             <span class="step-title">{{ $t('step1.buildComplete') }}</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase >= 2" class="badge accent">{{ $t('step1.inProgress') }}</span>
+            <span v-if="currentPhase >= 2" class="badge success">Ready</span>
           </div>
         </div>
         
         <div class="card-content">
-          <p class="api-note">POST /api/simulation/create</p>
+          <p class="api-note">OPEN /structured-workbench</p>
           <p class="description">{{ $t('step1.buildCompleteDesc') }}</p>
           <div v-if="currentPhase >= 2" class="focus-theatre complete-theatre">
             <div class="focus-copy">
               <span class="focus-kicker">Ready</span>
               <strong>Graph memory established</strong>
-              <p>The next step creates the simulation environment and turns graph nodes into participant agents.</p>
+              <p>The next step opens the structured lab: domain plan, agent generation, pocket simulation, validation, and report output.</p>
             </div>
           </div>
           <button 
@@ -222,7 +291,7 @@
             @click="handleEnterEnvSetup"
           >
             <span v-if="creatingSimulation" class="spinner-sm"></span>
-            {{ creatingSimulation ? $t('step1.creating') : $t('step1.enterEnvSetup') + ' ➝' }}
+            {{ creatingSimulation ? 'Opening lab...' : 'Open structured lab ➝' }}
           </button>
         </div>
       </div>
@@ -246,12 +315,8 @@
 
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
-import { createSimulation } from '../api/simulation'
-
-const router = useRouter()
-const { t } = useI18n()
+// Step 1 should not create the legacy simulation shell. It only hands the
+// completed graph into the structured Horizon XL workbench.
 
 const props = defineProps({
   currentPhase: { type: Number, default: 0 },
@@ -263,7 +328,7 @@ const props = defineProps({
   systemLogs: { type: Array, default: () => [] }
 })
 
-defineEmits(['next-step', 'retry'])
+const emit = defineEmits(['next-step', 'retry', 'approve-domain-contract'])
 
 const selectedOntologyItem = ref(null)
 const logContent = ref(null)
@@ -288,6 +353,18 @@ const ontologyPhraseList = computed(() => {
   ]
 })
 
+const domainContract = computed(() => props.projectData?.domain_contract || null)
+const contractTargets = computed(() => domainContract.value?.targets || [])
+const contractActors = computed(() => domainContract.value?.actors || [])
+const contractEvidence = computed(() => domainContract.value?.evidence || [])
+const contractInstructions = computed(() => domainContract.value?.instructions || [])
+const contractRejected = computed(() => domainContract.value?.rejected_prompt_fragments || [])
+const contractTimePockets = computed(() => domainContract.value?.time_pockets || [])
+
+const humanize = (value) => String(value || '')
+  .replace(/_/g, ' ')
+  .replace(/\b\w/g, (letter) => letter.toUpperCase())
+
 const connectionPreviewNodes = computed(() => {
   const entityTypes = props.projectData?.ontology?.entity_types || []
   const source = entityTypes.length ? entityTypes.map((entity) => entity?.name || 'Actor') : ['Prompt', 'Actors', 'Graph']
@@ -298,39 +375,18 @@ const connectionPreviewNodes = computed(() => {
   })
 })
 
-// Create a simulation and move to environment setup.
+// Move from signal map into the structured workbench.
 const handleEnterEnvSetup = async () => {
   if (!props.projectData?.project_id || !props.projectData?.graph_id) {
     console.error('Missing project or graph information')
     return
   }
-  
   creatingSimulation.value = true
-  
-  try {
-    const res = await createSimulation({
-      project_id: props.projectData.project_id,
-      graph_id: props.projectData.graph_id,
-      enable_twitter: true,
-      enable_reddit: true
-    })
-    
-    if (res.success && res.data?.simulation_id) {
-      // Navigate to the simulation page.
-      router.push({
-        name: 'Simulation',
-        params: { simulationId: res.data.simulation_id }
-      })
-    } else {
-      console.error('Failed to create simulation:', res.error)
-      alert(t('step1.createSimulationFailed', { error: res.error || t('common.unknownError') }))
-    }
-  } catch (err) {
-    console.error('Simulation creation exception:', err)
-    alert(t('step1.createSimulationException', { error: err.message }))
-  } finally {
+  await nextTick()
+  emit('next-step')
+  window.setTimeout(() => {
     creatingSimulation.value = false
-  }
+  }, 250)
 }
 
 const selectOntologyItem = (item, type) => {
@@ -381,7 +437,7 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .step-card {
-  background: rgba(255,255,255,0.72);
+  background: rgba(255,250,240,0.9);
   border-radius: var(--hx-radius-lg);
   padding: 22px;
   box-shadow: 0 16px 44px rgba(34,31,25,0.06);
@@ -399,8 +455,8 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .step-card.active {
-  border-color: rgba(23,107,135,0.36);
-  box-shadow: 0 24px 70px rgba(23,107,135,0.16);
+  border-color: rgba(42, 32, 21, 0.58);
+  box-shadow: 4px 4px 0 rgba(42, 32, 21, 0.14);
   transform: scale(1.018);
   z-index: 3;
 }
@@ -411,8 +467,8 @@ watch(() => props.systemLogs.length, () => {
   inset: -1px;
   border-radius: inherit;
   pointer-events: none;
-  background: linear-gradient(135deg, rgba(23,107,135,0.22), transparent 34%, rgba(192,139,92,0.18));
-  opacity: 0.22;
+  background: linear-gradient(135deg, rgba(127,29,29,0.12), transparent 34%, rgba(156,106,47,0.16));
+  opacity: 0.34;
   animation: focusGlow 2.8s ease-in-out infinite;
 }
 
@@ -447,7 +503,7 @@ watch(() => props.systemLogs.length, () => {
 
 .step-title {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 16px;
   color: var(--hx-ink);
   letter-spacing: -0.01em;
 }
@@ -469,26 +525,25 @@ watch(() => props.systemLogs.length, () => {
 .api-note {
   font-family: var(--hx-font-mono);
   font-size: 10px;
-  color: var(--hx-muted);
+  color: rgba(42, 32, 21, 0.72);
   margin-bottom: 8px;
 }
 
 .description {
-  font-size: 12px;
-  color: var(--hx-muted);
-  line-height: 1.5;
+  font-size: 13.5px;
+  color: rgba(42, 32, 21, 0.74);
+  line-height: 1.55;
   margin-bottom: 16px;
 }
 
 .focus-theatre {
   margin: 14px 0 16px;
   padding: 14px;
-  border: 1px solid rgba(23,107,135,0.14);
+  border: 1px solid rgba(42, 32, 21, 0.24);
   border-radius: var(--hx-radius-md);
   background:
-    linear-gradient(135deg, rgba(255,255,255,0.86), rgba(239,248,247,0.74)),
-    radial-gradient(circle at 82% 20%, rgba(192,139,92,0.14), transparent 16rem);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);
+    linear-gradient(135deg, rgba(255,250,240,0.92), rgba(242,229,207,0.8));
+  box-shadow: inset 0 0 0 1px rgba(42, 32, 21, 0.05);
   display: grid;
   gap: 12px;
   overflow: hidden;
@@ -510,13 +565,14 @@ watch(() => props.systemLogs.length, () => {
 
 .focus-copy strong {
   color: var(--hx-ink);
-  font-size: 13px;
+  font-size: 17px;
+  font-family: var(--hx-font-display);
 }
 
 .focus-copy p {
   margin: 0;
-  color: var(--hx-muted);
-  font-size: 12px;
+  color: rgba(42, 32, 21, 0.72);
+  font-size: 13.5px;
   line-height: 1.45;
 }
 
@@ -599,6 +655,92 @@ watch(() => props.systemLogs.length, () => {
   background:
     linear-gradient(135deg, rgba(30,127,92,0.08), rgba(255,255,255,0.78)),
     radial-gradient(circle at 86% 18%, rgba(30,127,92,0.12), transparent 12rem);
+}
+
+.domain-contract-card {
+  border-color: rgba(23,107,135,0.22);
+}
+
+.contract-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.contract-box {
+  min-height: 96px;
+  border: 1px solid rgba(42,32,21,0.14);
+  border-radius: var(--hx-radius-md);
+  background: rgba(255,255,255,0.7);
+  padding: 12px;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.contract-box.hero-box {
+  background:
+    linear-gradient(135deg, rgba(23,107,135,0.10), rgba(255,255,255,0.82)),
+    radial-gradient(circle at 100% 0%, rgba(192,139,92,0.12), transparent 8rem);
+}
+
+.box-label,
+.lane-title {
+  font-family: var(--hx-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--hx-accent);
+  font-weight: 800;
+}
+
+.contract-box strong {
+  font-size: 20px;
+  color: var(--hx-ink);
+  line-height: 1.05;
+}
+
+.contract-box small {
+  color: rgba(42,32,21,0.64);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.contract-lanes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.lane {
+  border: 1px dashed rgba(42,32,21,0.18);
+  border-radius: var(--hx-radius-md);
+  padding: 12px;
+  background: rgba(255,250,240,0.72);
+  min-height: 118px;
+}
+
+.lane p {
+  margin: 8px 0 0;
+  color: rgba(42,32,21,0.76);
+  font-size: 11.5px;
+  line-height: 1.38;
+  max-height: 3.9em;
+  overflow: hidden;
+}
+
+.approve-contract-btn {
+  width: 100%;
+  justify-content: center;
+}
+
+@media (max-width: 1180px) {
+  .contract-grid,
+  .contract-lanes {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 /* Step 01 Tags */
@@ -842,23 +984,33 @@ watch(() => props.systemLogs.length, () => {
 /* Step 03 Button */
 .action-btn {
   width: 100%;
-  background: linear-gradient(135deg, #111316, #193845);
-  color: #FFF;
-  border: none;
-  padding: 14px;
-  border-radius: var(--hx-radius-md);
+  background: var(--hx-ink);
+  color: var(--hx-bg-soft);
+  border: 2px solid var(--hx-ink);
+  padding: 15px 16px;
+  border-radius: 2px;
+  font-family: var(--hx-font-mono);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: background 0.2s, color 0.2s, opacity 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
 }
 
 .action-btn:hover:not(:disabled) {
-  opacity: 0.8;
+  background: var(--hx-accent);
+  border-color: var(--hx-accent);
 }
 
 .action-btn:disabled {
-  background: rgba(17,19,22,0.12);
+  background: rgba(42, 32, 21, 0.08);
+  border-color: rgba(42, 32, 21, 0.24);
+  color: rgba(42, 32, 21, 0.62);
   cursor: not-allowed;
 }
 
@@ -874,8 +1026,8 @@ watch(() => props.systemLogs.length, () => {
 .spinner-sm {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(23,107,135,0.18);
-  border-top-color: var(--hx-accent);
+  border: 2px solid rgba(42, 32, 21, 0.22);
+  border-top-color: currentColor;
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }

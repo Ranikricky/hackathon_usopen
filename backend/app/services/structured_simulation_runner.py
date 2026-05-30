@@ -9,11 +9,12 @@ domain-general; domain meaning comes from the prompt-derived plan and agents.
 
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
 
 from ..models.simulation_state import SimulationStateManager, StructuredSimulationState
 from .numeric_validation import NumericValidationService
+from .forecast_ledger import ForecastLedgerBuilder
 from ..utils.logger import get_logger
 
 
@@ -38,6 +39,7 @@ class StructuredSimulationRunner:
         domain_plan: Dict[str, Any],
         agents: List[Dict[str, Any]],
         evidence_text: str = "",
+        graph_context: Dict[str, Any] | None = None,
     ) -> StructuredSimulationState:
         state = SimulationStateManager.initialize(
             simulation_id=simulation_id,
@@ -45,6 +47,8 @@ class StructuredSimulationRunner:
             domain_plan=domain_plan,
             agents=agents,
         )
+        graph_brain = self._build_graph_brain(graph_context or {}, domain_plan, evidence_text)
+        state.graph_context = graph_brain
 
         state.agent_outputs = []
         state.scenario_outputs = {scenario: {} for scenario in self._required_scenarios(domain_plan)}
@@ -58,12 +62,21 @@ class StructuredSimulationRunner:
             ),
             "by_target": {},
             "agent_disagreement": {},
+            "graph_brain": graph_brain,
         }
 
         targets = [
             variable for variable in domain_plan.get("target_variables", [])
             if variable.get("required", True)
         ] or [{"name": "primary_outcome", "unit": "index", "required": True}]
+        forecast_periods = self._forecast_periods(domain_plan, state.time_pockets)
+        state.aggregated_outputs["forecast_horizon"] = {
+            "granularity": (domain_plan.get("forecast_horizon") or {}).get("granularity") or "event_triggered",
+            "start": (domain_plan.get("forecast_horizon") or {}).get("start"),
+            "end": (domain_plan.get("forecast_horizon") or {}).get("end"),
+            "point_count": len(forecast_periods),
+            "dates": [period.get("date") for period in forecast_periods],
+        }
         numeric_agents = [
             agent for agent in agents
             if (agent.get("numeric_capabilities") or {}).get("must_output_numbers", True)
@@ -74,6 +87,7 @@ class StructuredSimulationRunner:
             state_after = self._state_snapshot(targets, pocket_idx, prior=False)
             pocket["state_before"] = state_before
             pocket["state_after"] = state_after
+            pocket["graph_brain"] = self._graph_pocket_directive(graph_brain, pocket, targets)
             pocket["agent_actions"] = [
                 self._agent_action(agent, pocket, domain_plan)
                 for agent in agents[: min(len(agents), 40)]
@@ -89,6 +103,7 @@ class StructuredSimulationRunner:
                     target=target,
                     target_idx=target_idx,
                     time_pockets=state.time_pockets,
+                    forecast_periods=forecast_periods,
                     domain_plan=domain_plan,
                     evidence_text=evidence_text,
                 )
@@ -100,6 +115,7 @@ class StructuredSimulationRunner:
             state=state,
             targets=targets,
             evidence_text=evidence_text,
+            graph_brain=graph_brain,
         )
         debate_revisions = self._extract_debate_revisions(state.discussion_transcript)
         state.agent_outputs = self._apply_debate_revisions(state.agent_outputs, debate_revisions, state.time_pockets)
@@ -109,11 +125,17 @@ class StructuredSimulationRunner:
         state.aggregated_outputs["final_outcome"] = self._final_outcome_summary(state.scenario_outputs, targets, evidence_text)
         state.aggregated_outputs["debate_revisions"] = debate_revisions
         state.aggregated_outputs["debate_impact"] = self._debate_impact_summary(debate_revisions)
+        state.aggregated_outputs["report_template"] = (
+            (domain_plan.get("domain_contract") or {}).get("report_template")
+            or "generic_forecast_memo"
+        )
+        state.aggregated_outputs["forecast_ledger"] = ForecastLedgerBuilder().build(state.to_dict())
         # Rebuild once so the visible transcript and quant summaries reflect the debated state.
         state.discussion_transcript = self._build_discussion_transcript(
             state=state,
             targets=targets,
             evidence_text=evidence_text,
+            graph_brain=graph_brain,
         )
         turns_by_pocket = {}
         for turn in state.discussion_transcript:
@@ -123,6 +145,7 @@ class StructuredSimulationRunner:
 
         validation = NumericValidationService().validate(state.to_dict())
         state.validation = validation
+        state.aggregated_outputs["forecast_ledger"] = ForecastLedgerBuilder().build(state.to_dict())
         saved = SimulationStateManager.save(state)
         logger.info(
             "Structured simulation saved: %s agents=%s targets=%s outputs=%s validation=%s",
@@ -133,6 +156,248 @@ class StructuredSimulationRunner:
             validation.get("passed"),
         )
         return saved
+
+    def _build_graph_brain(
+        self,
+        graph_context: Dict[str, Any],
+        domain_plan: Dict[str, Any],
+        evidence_text: str,
+    ) -> Dict[str, Any]:
+        """Turn the signal graph into an always-on run supervisor.
+
+        The graph brain is not another simulated stakeholder. It is the run's
+        evidence conscience: actor roster, requested variables, evidence cards,
+        missing-data warnings, and intervention instructions.
+        """
+        nodes = graph_context.get("nodes") if isinstance(graph_context, dict) else []
+        edges = graph_context.get("edges") if isinstance(graph_context, dict) else []
+        nodes = nodes if isinstance(nodes, list) else []
+        edges = edges if isinstance(edges, list) else []
+
+        def has_label(node: Dict[str, Any], label: str) -> bool:
+            return label in (node.get("labels") or [])
+
+        actor_nodes = [node for node in nodes if has_label(node, "Entity")]
+        target_nodes = [node for node in nodes if has_label(node, "TargetVariable")]
+        evidence_sources = [node for node in nodes if has_label(node, "EvidenceSource")]
+        evidence_claims = [node for node in nodes if has_label(node, "EvidenceClaim")]
+        numeric_facts = [node for node in nodes if has_label(node, "NumericFact")]
+        time_pockets = [node for node in nodes if has_label(node, "TimePocket")]
+
+        actor_names = [str(node.get("name") or "") for node in actor_nodes if node.get("name")]
+        target_names = [
+            str((node.get("attributes") or {}).get("target_variable") or node.get("name") or "")
+            for node in target_nodes
+        ]
+        if not target_names:
+            target_names = [str(target.get("name") or "") for target in domain_plan.get("target_variables", [])]
+
+        evidence_cards = self._graph_evidence_cards(evidence_claims, numeric_facts, evidence_text)
+        prompt_evidence_notes = [
+            note for note in self._extract_evidence_notes(evidence_text)
+            if not self._is_bad_evidence_card(note)
+            and not note.startswith("The prompt provides the active evidence set")
+        ]
+        missing_target_evidence = self._graph_missing_target_evidence(target_names, evidence_cards)
+        invalid_actor_nodes = [
+            name for name in actor_names
+            if re.search(r"\b(?:usd|kwh|mwh|gwh|twh|pocket|baseline|snapshot|synthesis|target|variable|forecast table|scenario path)\b", name, re.IGNORECASE)
+        ]
+        warnings = []
+        if not evidence_sources and not evidence_claims and not numeric_facts:
+            warnings.append("Graph has no explicit evidence-source/claim/fact lane; debate must rely on prompt evidence only.")
+        if missing_target_evidence:
+            warnings.append(f"Targets with thin numeric support: {', '.join(missing_target_evidence[:8])}.")
+        if invalid_actor_nodes:
+            warnings.append(f"Non-actor artifacts appeared in actor lane: {', '.join(invalid_actor_nodes[:8])}.")
+
+        interventions = [
+            "Moderator must stop drift whenever agent claims do not map to a target variable or evidence card.",
+            "Evidence Auditor must flag unsupported, post-cutoff, or source-less claims before quant synthesis.",
+            "Research Scout must add source pointers for thin targets instead of letting agents improvise facts.",
+            "Data Retrieval Analyst must extract units, dates, denominators, ranges, and source caveats before numbers are used.",
+            "Quantitative Synthesizer may aggregate only numeric-capable agents and must preserve non-numeric agents as pressure signals.",
+        ]
+        if missing_target_evidence:
+            interventions.insert(0, f"Immediate follow-up: retrieve or label missing evidence for {', '.join(missing_target_evidence[:6])}.")
+        reexecution_advice = []
+        if invalid_actor_nodes:
+            reexecution_advice.append("Re-run ontology/graph repair for actor-lane cleanup; do not stop the simulation while repaired graph data is pending.")
+        if missing_target_evidence:
+            reexecution_advice.append("Re-run or enrich research/data extraction for thin target variables before treating confidence as high.")
+        if not evidence_cards:
+            reexecution_advice.append("Proceed in prompt-only degraded mode and ask the user or research scout for more evidence before polished claims.")
+
+        return {
+            "mode": "active_graph_conscience",
+            "control_contract": {
+                "allowed_dynamic_controls": [
+                    "research_queries",
+                    "source_priorities",
+                    "debate_agenda",
+                    "agent_context",
+                    "evidence_cards",
+                    "validation_warnings",
+                    "rerun_recommendations",
+                ],
+                "forbidden_controls": [
+                    "runtime_source_code_mutation",
+                    "blocking_step_completion_without_diagnostic",
+                    "inventing_forecasts_or_sources",
+                    "overriding_numeric_validation",
+                ],
+                "failure_policy": (
+                    "Graph guidance is advisory and corrective. It may request re-execution or enrichment, "
+                    "but it must never dead-end the run. If graph data is weak, continue with explicit caveats "
+                    "and let numeric validation decide whether polished output is safe."
+                ),
+            },
+            "graph_id": graph_context.get("graph_id") if isinstance(graph_context, dict) else None,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "actor_count": len(actor_nodes),
+            "target_count": len(target_names),
+            "evidence_source_count": len(evidence_sources),
+            "evidence_claim_count": len(evidence_claims),
+            "numeric_fact_count": len(numeric_facts),
+            "prompt_evidence_count": len(prompt_evidence_notes),
+            "clean_evidence_count": len(evidence_cards) + len(prompt_evidence_notes),
+            "time_pocket_count": len(time_pockets),
+            "actor_roster_preview": actor_names[:30],
+            "target_variables": target_names[:40],
+            "evidence_cards": evidence_cards[:80],
+            "prompt_evidence_preview": prompt_evidence_notes[:20],
+            "missing_target_evidence": missing_target_evidence,
+            "invalid_actor_nodes": invalid_actor_nodes,
+            "warnings": warnings,
+            "intervention_plan": interventions,
+            "reexecution_advice": reexecution_advice,
+            "blocking": False,
+        }
+
+    def _graph_evidence_cards(
+        self,
+        evidence_claims: List[Dict[str, Any]],
+        numeric_facts: List[Dict[str, Any]],
+        evidence_text: str,
+    ) -> List[str]:
+        cards: List[str] = []
+        for node in numeric_facts:
+            summary = re.sub(r"\s+", " ", str(node.get("summary") or node.get("name") or "")).strip()
+            if summary:
+                cards.append(f"Graph numeric fact :: {summary[:300]}")
+        for node in evidence_claims:
+            summary = re.sub(r"\s+", " ", str(node.get("summary") or node.get("name") or "")).strip()
+            if summary:
+                cards.append(f"Graph evidence claim :: {summary[:300]}")
+        for note in self._numeric_anchor_notes(evidence_text)[:30]:
+            cards.append(f"Prompt numeric anchor :: {note[:300]}")
+        return [
+            card for card in list(dict.fromkeys(cards))
+            if not self._is_bad_evidence_card(card)
+        ]
+
+    def _is_bad_evidence_card(self, value: Any) -> bool:
+        """Reject workflow scaffolding, role lists, and prompt instructions as evidence."""
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            return True
+        # Remove common card prefixes before judging the actual content.
+        bare = re.sub(
+            r"^(?:graph numeric fact|graph evidence claim|prompt numeric anchor|[^:]{1,90})\s*::\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        lowered = bare.lower().strip(" .")
+        if not lowered:
+            return True
+        if self._is_meta_instruction_note(bare) or self._looks_like_metric_request_line(bare):
+            return True
+        bad_fragments = [
+            "agents must",
+            "agent must",
+            "for every agent",
+            "each agent",
+            "debate moderator",
+            "separate fact, inference",
+            "avoid leakage",
+            "do not use future",
+            "do not generate",
+            "do not produce",
+            "numeric forecasts first",
+            "clearly separate facts",
+            "required output",
+            "required outputs",
+            "target variables",
+            "time-pocket simulation",
+            "time pocket simulation",
+            "create ",
+            "generate ",
+            "produce ",
+            "output ",
+            "run four scenarios",
+            "run the simulation",
+            "forecast these",
+            "simulate sequentially",
+            "what would change their view",
+            "challenge another agent",
+            "cite evidence",
+            "make a concrete claim",
+        ]
+        if any(fragment in lowered for fragment in bad_fragments):
+            return True
+        # A numbered list item like "2. Bolton regime defender" is an actor hint,
+        # not a dated fact or numeric anchor. Keep numbered evidence only when it
+        # has an observable metric/event/state term.
+        if re.fullmatch(r"\d{1,2}\.\s+[a-z0-9 /'&().,-]{2,90}", lowered):
+            has_observable_context = bool(re.search(
+                r"%|percent|rate|price|seat|vote|turnout|poll|won|lost|died|survived|"
+                r"betray|battle|alliance|claim|throne|army|fleet|dragon|wall|"
+                r"supply|demand|capacity|growth|risk|index|election|baseline|"
+                r"\b(?:19|20)\d{2}\b",
+                lowered,
+            ))
+            if not has_observable_context:
+                return True
+        return False
+
+    def _graph_missing_target_evidence(self, target_names: List[str], evidence_cards: List[str]) -> List[str]:
+        missing: List[str] = []
+        joined_cards = "\n".join(evidence_cards).lower()
+        for target in target_names:
+            cleaned = _clean_name(target)
+            tokens = [
+                token for token in re.split(r"[_\s/]+", cleaned)
+                if len(token) >= 4 and token not in {"target", "variable", "probability", "price", "rate", "cost", "index", "share"}
+            ]
+            if not tokens:
+                continue
+            overlap = sum(1 for token in tokens if token in joined_cards)
+            if overlap == 0:
+                missing.append(cleaned)
+        return missing[:16]
+
+    def _graph_pocket_directive(
+        self,
+        graph_brain: Dict[str, Any],
+        pocket: Dict[str, Any],
+        targets: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        label = str(pocket.get("label") or pocket.get("pocket_id") or "")
+        target_names = [str(target.get("name") or "") for target in targets[:8]]
+        return {
+            "directive": (
+                f"Before advancing `{label}`, compare agent claims against graph evidence, "
+                f"missing targets, and requested outputs: {', '.join(target_names)}."
+            ),
+            "blocking": False,
+            "failure_policy": "Proceed with caveats; request targeted re-execution/enrichment instead of stopping the flow.",
+            "interventions": graph_brain.get("intervention_plan", [])[:5],
+            "reexecution_advice": graph_brain.get("reexecution_advice", [])[:5],
+            "warnings": graph_brain.get("warnings", [])[:5],
+            "missing_target_evidence": graph_brain.get("missing_target_evidence", [])[:8],
+        }
 
     def _required_scenarios(self, domain_plan: Dict[str, Any]) -> List[str]:
         scenario_flags = domain_plan.get("scenario_structure") or {}
@@ -165,15 +430,18 @@ class StructuredSimulationRunner:
         target: Dict[str, Any],
         target_idx: int,
         time_pockets: List[Dict[str, Any]],
+        forecast_periods: List[Dict[str, Any]],
         domain_plan: Dict[str, Any],
         evidence_text: str,
     ) -> Dict[str, Any]:
         target_name = target.get("name") or "primary_outcome"
         unit = target.get("unit") or "index"
         forecast_path = []
-        for pocket_idx, pocket in enumerate(time_pockets):
-            date = pocket.get("end") if pocket.get("end") != "auto" else pocket.get("label") or pocket.get("pocket_id")
+        periods = forecast_periods or self._pocket_periods(time_pockets)
+        for period_idx, period in enumerate(periods):
+            date = period.get("date") or period.get("label") or period.get("period_id")
             for scenario in self._required_scenarios(domain_plan):
+                period_label = str(period.get("label") or date or period.get("period_id") or "")
                 forecast_path.append({
                     "date": date,
                     "value": self._forecast_value(
@@ -182,12 +450,16 @@ class StructuredSimulationRunner:
                         agent=agent,
                         agent_idx=agent_idx,
                         target_idx=target_idx,
-                        pocket_idx=pocket_idx,
+                        pocket_idx=period_idx,
+                        pocket_label=period_label,
                         scenario=scenario,
                         evidence_text=evidence_text,
                     ),
                     "unit": unit,
                     "scenario": scenario,
+                    "period_index": period_idx,
+                    "period_label": period_label,
+                    "period_source": period.get("source") or "forecast_horizon",
                 })
         confidence = self._confidence(agent, target_name, evidence_text)
         return {
@@ -214,6 +486,171 @@ class StructuredSimulationRunner:
             "blind_spots": agent.get("blind_spots") or ["May overweight its own information advantage."],
         }
 
+    def _forecast_periods(
+        self,
+        domain_plan: Dict[str, Any],
+        time_pockets: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Generate forecast output dates separately from debate time pockets."""
+        horizon = domain_plan.get("forecast_horizon") or {}
+        granularity = str(horizon.get("granularity") or "event_triggered").lower()
+        start_raw = horizon.get("start")
+        end_raw = horizon.get("end")
+        if granularity in {"event_triggered", "event", "auto"}:
+            return self._pocket_periods(time_pockets)
+
+        if granularity == "yearly":
+            start_year = self._parse_year_bound(start_raw, default=None)
+            end_year = self._parse_year_bound(end_raw, default=start_year)
+            if start_year and end_year:
+                if end_year < start_year:
+                    start_year, end_year = end_year, start_year
+                return [
+                    {
+                        "period_id": f"period_{year}",
+                        "date": str(year),
+                        "label": str(year),
+                        "source": "forecast_horizon",
+                    }
+                    for year in range(start_year, min(end_year, start_year + 30) + 1)
+                ]
+
+        start = self._parse_date_bound(start_raw, prefer_end=False)
+        end = self._parse_date_bound(end_raw, prefer_end=True)
+        if not start or not end:
+            return self._pocket_periods(time_pockets)
+        if end < start:
+            start, end = end, start
+
+        if granularity == "monthly":
+            periods = []
+            current = datetime(start.year, start.month, 1)
+            final = datetime(end.year, end.month, 1)
+            idx = 0
+            while current <= final and idx < 120:
+                periods.append({
+                    "period_id": f"period_{idx + 1:03d}",
+                    "date": current.strftime("%Y-%m"),
+                    "label": current.strftime("%b %Y"),
+                    "source": "forecast_horizon",
+                })
+                current = self._add_months(current, 1)
+                idx += 1
+            return periods or self._pocket_periods(time_pockets)
+
+        if granularity == "quarterly":
+            periods = []
+            current = datetime(start.year, ((start.month - 1) // 3) * 3 + 1, 1)
+            final = datetime(end.year, ((end.month - 1) // 3) * 3 + 1, 1)
+            idx = 0
+            while current <= final and idx < 80:
+                quarter = ((current.month - 1) // 3) + 1
+                periods.append({
+                    "period_id": f"period_{idx + 1:03d}",
+                    "date": f"{current.year}-Q{quarter}",
+                    "label": f"Q{quarter} {current.year}",
+                    "source": "forecast_horizon",
+                })
+                current = self._add_months(current, 3)
+                idx += 1
+            return periods or self._pocket_periods(time_pockets)
+
+        if granularity == "weekly":
+            return self._fixed_day_periods(start, end, step_days=7, max_points=156, date_format="%Y-%m-%d")
+        if granularity == "daily":
+            return self._fixed_day_periods(start, end, step_days=1, max_points=180, date_format="%Y-%m-%d")
+        return self._pocket_periods(time_pockets)
+
+    def _pocket_periods(self, time_pockets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        periods = []
+        for idx, pocket in enumerate(time_pockets or []):
+            date = pocket.get("end") if pocket.get("end") != "auto" else pocket.get("label") or pocket.get("pocket_id")
+            periods.append({
+                "period_id": f"period_{idx + 1:03d}",
+                "date": date,
+                "label": pocket.get("label") or date,
+                "source": "time_pocket",
+            })
+        return periods or [{
+            "period_id": "period_001",
+            "date": "event_triggered simulation pocket",
+            "label": "event_triggered simulation pocket",
+            "source": "fallback",
+        }]
+
+    def _fixed_day_periods(
+        self,
+        start: datetime,
+        end: datetime,
+        step_days: int,
+        max_points: int,
+        date_format: str,
+    ) -> List[Dict[str, Any]]:
+        periods = []
+        current = start
+        idx = 0
+        while current <= end and idx < max_points:
+            periods.append({
+                "period_id": f"period_{idx + 1:03d}",
+                "date": current.strftime(date_format),
+                "label": current.strftime(date_format),
+                "source": "forecast_horizon",
+            })
+            current += timedelta(days=step_days)
+            idx += 1
+        return periods
+
+    def _add_months(self, value: datetime, months: int) -> datetime:
+        month = value.month - 1 + months
+        year = value.year + month // 12
+        month = month % 12 + 1
+        return datetime(year, month, 1)
+
+    def _parse_year_bound(self, value: Any, default: int | None = None) -> int | None:
+        match = re.search(r"\b(20\d{2}|19\d{2})\b", str(value or ""))
+        return int(match.group(1)) if match else default
+
+    def _parse_date_bound(self, value: Any, prefer_end: bool = False) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        month_pattern = (
+            r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+        )
+        match = re.search(month_pattern + r"[\s,/-]+(20\d{2}|19\d{2})", text, flags=re.IGNORECASE)
+        if match:
+            month = self._month_number(match.group(1))
+            return datetime(int(match.group(2)), month, 1)
+        match = re.search(r"\b(20\d{2}|19\d{2})[-/](\d{1,2})(?:[-/](\d{1,2}))?\b", text)
+        if match:
+            year = int(match.group(1))
+            month = max(1, min(12, int(match.group(2))))
+            day = max(1, min(28, int(match.group(3) or 1)))
+            return datetime(year, month, day)
+        match = re.search(r"\b(20\d{2}|19\d{2})\b", text)
+        if match:
+            year = int(match.group(1))
+            return datetime(year, 12 if prefer_end else 1, 1)
+        return None
+
+    def _month_number(self, value: str) -> int:
+        lookup = {
+            "jan": 1, "january": 1,
+            "feb": 2, "february": 2,
+            "mar": 3, "march": 3,
+            "apr": 4, "april": 4,
+            "may": 5,
+            "jun": 6, "june": 6,
+            "jul": 7, "july": 7,
+            "aug": 8, "august": 8,
+            "sep": 9, "sept": 9, "september": 9,
+            "oct": 10, "october": 10,
+            "nov": 11, "november": 11,
+            "dec": 12, "december": 12,
+        }
+        return lookup.get(str(value or "").lower()[:3], 1)
+
     def _forecast_value(
         self,
         target_name: str,
@@ -222,6 +659,7 @@ class StructuredSimulationRunner:
         agent_idx: int,
         target_idx: int,
         pocket_idx: int,
+        pocket_label: str,
         scenario: str,
         evidence_text: str,
     ) -> float:
@@ -233,6 +671,7 @@ class StructuredSimulationRunner:
             agent_idx=agent_idx,
             target_idx=target_idx,
             pocket_idx=pocket_idx,
+            pocket_label=pocket_label,
             scenario=scenario,
             evidence_text=evidence_text,
         )
@@ -264,80 +703,378 @@ class StructuredSimulationRunner:
         agent_idx: int,
         target_idx: int,
         pocket_idx: int,
+        pocket_label: str,
         scenario: str,
         evidence_text: str,
     ) -> float | None:
         """Use prompt-supplied numeric anchors when target names expose a metric.
 
         This is not domain-specific. It activates for reusable constrained
-        output types such as vote share, seats, turnout, probability, and index.
+        output types such as shares, counts, probabilities, prices, costs,
+        growth rates, inventory cover, and indices.
         """
         label, metric = self._target_label_and_metric(target_name)
         if not metric:
             return None
-        evidence_anchor = self._extract_metric_anchor(label, metric, evidence_text)
+        evidence_anchor = self._extract_metric_anchor(label, metric, evidence_text, unit, target_name, pocket_label)
         scenario_shift = self._scenario_shift(scenario, target_name, agent)
         agent_bias = self._agent_numeric_bias(agent, label, target_name)
         pocket_drift = pocket_idx * self._metric_drift(metric, scenario)
         jitter = self._stable_jitter(agent.get("agent_id"), target_name, scenario, evidence_text, span=2.4)
 
-        if metric in {"vote_share", "seat_share", "share", "rate", "turnout", "index"}:
-            base = evidence_anchor if evidence_anchor is not None else 50.0
+        if metric in {"vote_share", "seat_share", "share", "rate", "turnout", "index", "growth_rate", "growth"}:
+            base = evidence_anchor if evidence_anchor is not None else self._default_rate_anchor(label, metric)
             value = base + scenario_shift * 0.35 + agent_bias + pocket_drift + jitter
             return round(max(0.0, min(100.0, value)), 2)
+        if metric in {"price", "cost", "value", "premium", "revenue", "capex"}:
+            label_terms = self._meaningful_label_terms(label)
+            base = evidence_anchor
+            if base is None and not label_terms:
+                base = self._generic_currency_anchor(evidence_text, unit, label, metric)
+            if base is None:
+                base = self._default_currency_anchor(label, unit, metric)
+            if base is None:
+                return None
+            value = base * (1 + (scenario_shift * 0.006) + (agent_bias * 0.004) + (pocket_drift * 0.003))
+            value += jitter * max(1.0, abs(base) * 0.012)
+            return round(max(0.0, value), 2)
         if metric == "probability":
             base = evidence_anchor if evidence_anchor is not None else self._probability_anchor_from_target(label, scenario)
             value = base + scenario_shift * 0.45 + agent_bias + pocket_drift + jitter
             return round(max(1.0, min(99.0, value)), 2)
+        if metric == "inventory_cover":
+            base = evidence_anchor if evidence_anchor is not None else 3.5
+            value = base + scenario_shift * 0.04 + agent_bias * 0.03 + pocket_drift * 0.08 + jitter * 0.12
+            return round(max(0.0, value), 2)
         if metric in {"seats", "count"}:
             total = self._extract_total_count(evidence_text) or 100.0
             if evidence_anchor is None:
-                evidence_anchor = total * 0.34
+                if label in {"other", "others", "misc", "miscellaneous", "independent", "independents"}:
+                    share_anchor = (
+                        self._extract_metric_anchor(label, "vote_share", evidence_text, unit, target_name, pocket_label)
+                        or self._extract_metric_anchor(label, "share", evidence_text, unit, target_name, pocket_label)
+                    )
+                    evidence_anchor = total * (share_anchor / 100.0) if share_anchor is not None else total * 0.08
+                else:
+                    evidence_anchor = total * 0.34
             value = evidence_anchor + scenario_shift * (total / 220.0) + agent_bias * (total / 140.0) + pocket_drift + jitter * (total / 100.0)
             return round(max(0.0, min(total, value)), 0)
         return None
 
     def _target_label_and_metric(self, target_name: str) -> Tuple[str, str]:
         name = _clean_name(target_name)
+        if "inventory_cover" in name:
+            return name.replace("inventory_cover", "").strip("_"), "inventory_cover"
+        if name.startswith("probability_"):
+            return name[len("probability_"):], "probability"
+        if "probability_of_" in name:
+            return name.replace("probability_of_", ""), "probability"
         suffixes = [
-            "vote_share", "seat_share", "probability", "turnout", "seats",
-            "share", "rate", "index", "count",
+            "vote_share", "seat_share", "growth_rate", "probability", "turnout", "seats",
+            "share", "rate", "growth", "index", "count",
         ]
         for suffix in suffixes:
             if name == suffix:
                 return "", suffix
             if name.endswith(f"_{suffix}"):
                 return name[: -(len(suffix) + 1)], suffix
-        if "probability_of_" in name:
-            return name.replace("probability_of_", ""), "probability"
+        for metric in ["price", "cost", "value", "premium", "revenue", "capex"]:
+            marker = f"_{metric}"
+            if marker in name:
+                return name.split(marker, 1)[0], metric
+            if name.endswith(metric):
+                return name[: -len(metric)].strip("_"), metric
         return "", ""
 
-    def _extract_metric_anchor(self, label: str, metric: str, evidence_text: str) -> float | None:
+    def _extract_metric_anchor(
+        self,
+        label: str,
+        metric: str,
+        evidence_text: str,
+        unit: str = "",
+        target_name: str = "",
+        pocket_label: str = "",
+    ) -> float | None:
         text = evidence_text or ""
         if not text:
             return None
-        label_terms = [term for term in re.split(r"[_\s/]+", label or "") if len(term) >= 2]
+        label_terms = self._meaningful_label_terms(label)
         if not label_terms and metric not in {"turnout"}:
             return None
         label_pattern = r"(?:%s)" % r"|".join(re.escape(term) for term in label_terms) if label_terms else ""
         values: List[float] = []
 
-        if metric in {"vote_share", "seat_share", "share", "rate", "turnout", "index", "probability"}:
+        if metric in {"vote_share", "seat_share", "share", "rate", "turnout", "index", "probability", "growth_rate", "growth"}:
+            if metric == "index" and "index" not in str(target_name or label).lower():
+                return None
             if label_pattern:
-                for match in re.finditer(label_pattern + r"[^%\n]{0,60}?(\d{1,3}(?:\.\d+)?)\s*%", text, flags=re.IGNORECASE):
-                    values.append(float(match.group(1)))
-            elif metric == "turnout":
-                for match in re.finditer(r"turnout[^%\n]{0,50}?(\d{1,3}(?:\.\d+)?)\s*%", text, flags=re.IGNORECASE):
+                for line in text.splitlines():
+                    line_l = line.lower()
+                    if not self._line_matches_label(line_l, label_terms, min_matches=2 if len(label_terms) >= 2 else 1):
+                        continue
+                    if metric == "index" and "index" not in line_l:
+                        continue
+                    if metric in {"growth_rate", "growth", "rate"} and not re.search(r"\b(growth|rate|increase|decline|fell|rose|yoy|year[- ]on[- ]year)\b", line_l):
+                        continue
+                    labeled_values = self._labeled_percent_values(line, label_terms)
+                    if labeled_values:
+                        values.extend(labeled_values)
+                        continue
+                    for match in re.finditer(r"(\d{1,3}(?:\.\d+)?)\s*%", line, flags=re.IGNORECASE):
+                        values.append(float(match.group(1)))
+            if metric == "turnout" and not values:
+                for match in re.finditer(r"turnout[^%\n]{0,60}?(\d{1,3}(?:\.\d+)?)\s*%", text, flags=re.IGNORECASE):
                     values.append(float(match.group(1)))
             return values[-1] if values else None
 
-        if metric in {"seats", "count"} and label_pattern:
-            for match in re.finditer(label_pattern + r"[^%\n]{0,35}?(\d{1,4})\s*(?:seats?|,|\.|\))", text, flags=re.IGNORECASE):
-                value = float(match.group(1))
-                if value <= 10000:
-                    values.append(value)
+        if metric in {"price", "cost", "value", "premium", "revenue", "capex"}:
+            label_token_set = set(label_terms)
+            scored_values: List[Tuple[float, int, float]] = []
+            lines = text.splitlines()
+            for line_no, line in enumerate(lines):
+                previous = lines[line_no - 1] if line_no > 0 else ""
+                match_l = f"{previous} {line}".strip().lower()
+                line_l = line.lower()
+                min_matches = 2 if len(label_token_set) >= 2 else 1
+                if label_token_set and not self._line_matches_label(match_l, label_terms, min_matches=min_matches):
+                    continue
+                if metric == "cost" and "kwh" in str(unit).lower() and not re.search(r"\b(kwh|pack|battery\s+cost|cell\s+cost)\b", match_l):
+                    continue
+                if not re.search(r"\b(price|cost|value|premium|revenue|capex|usd|dollars?|\$|eur|gbp|inr|kwh|kg|metric ton|tonne|barrel)\b", match_l):
+                    continue
+                number_items = self._numbers_with_context(line)
+                long_mixed_source_line = len(line) > 700 and len(number_items) > 6
+                if long_mixed_source_line:
+                    continue
+                for value, context in number_items:
+                    if 1900 <= value <= 2100:
+                        continue
+                    if value < 0 or context.get("is_percent"):
+                        continue
+                    if context.get("is_list_marker"):
+                        continue
+                    if label_token_set and metric in {"price", "cost", "value", "premium", "revenue", "capex"}:
+                        prefix_len = (len(previous) + 1 if previous else 0) + int(context.get("start") or 0)
+                        prefix_l = match_l[:prefix_len]
+                        if not self._line_matches_label(prefix_l, label_terms, min_matches=min_matches):
+                            continue
+                    if self._is_unit_scale_mismatch(value, line_l, unit):
+                        continue
+                    value = self._normalize_currency_value(value, line_l, unit, target_name)
+                    score = 1.0
+                    if label_token_set:
+                        score += len(label_token_set & set(re.findall(r"[a-zA-Z0-9]{3,}", match_l))) * 2.0
+                    if pocket_label and self._line_matches_label(line_l, self._meaningful_label_terms(pocket_label), min_matches=1):
+                        score += 2.5
+                    if re.search(r"\b(base|current|latest|today|as of|now|spot|benchmark)\b", match_l):
+                        score += 2.0
+                    if re.search(r"\b(may\s+2026|march\s+2026|2026)\b", match_l) and not re.search(r"\b(2021|2022|2023|2024|2025)\b", str(pocket_label).lower()):
+                        score += 2.0
+                    if re.search(r"\b(crash|correction|marginal cost|below cost|trough|2023|2024|2025)\b", str(pocket_label).lower()) and re.search(r"\b(crash|correction|marginal cost|below cost|trough|2023|2024|2025)\b", line_l):
+                        score += 4.0
+                    if re.search(r"\b(peak|previous|historical|past|last cycle)\b", line_l):
+                        score -= 1.0
+                    if re.search(r"\b(peak|late[- ]?2022|2021[- ]?2022|boom)\b", line_l):
+                        if re.search(r"\b(boom|2021|2022|baseline)\b", str(pocket_label).lower()):
+                            score += 3.0
+                        else:
+                            score -= 8.0
+                    scored_values.append((score, line_no, value))
+            if scored_values:
+                scored_values.sort(key=lambda item: (item[0], item[1]))
+                return scored_values[-1][2]
+
+        if metric == "inventory_cover":
+            for line in text.splitlines():
+                line_l = line.lower()
+                if not self._line_matches_label(line_l, label_terms, min_matches=1):
+                    continue
+                if not re.search(r"\b(inventory|cover)\b", line_l):
+                    continue
+                for value, context in self._numbers_with_context(line):
+                    if context.get("is_list_marker"):
+                        continue
+                    if re.search(r"\b(next|following|forecast horizon|horizon)\b", line_l) and value in {12, 18, 24, 36, 48, 60}:
+                        continue
+                    if not context.get("is_percent") and 0 <= value <= 60:
+                        values.append(value)
             return values[-1] if values else None
+
+        if metric in {"seats", "count"} and label_pattern:
+            scored_values: List[Tuple[float, int, float]] = []
+            assembly_like_prompt = bool(re.search(r"\b(assembly|legislative|state election)\b", text, flags=re.IGNORECASE))
+            for line_no, line in enumerate(text.splitlines()):
+                line_l = line.lower()
+                context_score = 0.0
+                if assembly_like_prompt:
+                    if "assembly-segment" in line_l:
+                        context_score += 8.0
+                    if re.search(r"\b(assembly|legislative|state election)\b", line_l):
+                        context_score += 5.0
+                    if re.search(r"\b(lok sabha|parliament|ls)\b", line_l):
+                        context_score -= 5.0
+                for match in re.finditer(label_pattern + r"[^%\n]{0,35}?(\d{1,4})\s*(?:seats?|,|\.|\)|$)", line, flags=re.IGNORECASE):
+                    value = float(match.group(1))
+                    if 0 <= value <= 10000 and value not in {1900, 2000, 2011, 2014, 2016, 2019, 2021, 2024, 2026}:
+                        scored_values.append((context_score, line_no, value))
+            if scored_values:
+                scored_values.sort(key=lambda item: (item[0], item[1]))
+                return scored_values[-1][2]
         return None
+
+    def _labeled_percent_values(self, line: str, label_terms: List[str]) -> List[float]:
+        """Extract percentages attached to the requested label on mixed lines.
+
+        Prompts often contain compact rows such as
+        "Actor A 46.2%, Actor B 39.1%, Actor C 10%". A plain line-level percent
+        scan would return the last value for every actor. This helper chooses
+        the nearest following percent after the matching label phrase.
+        """
+        if not line or not label_terms:
+            return []
+        line_l = line.lower()
+        label_variants = self._label_variants(label_terms)
+        candidates: List[Tuple[int, float]] = []
+        for variant in label_variants:
+            for label_match in re.finditer(variant, line_l, flags=re.IGNORECASE):
+                after = line[label_match.end(): label_match.end() + 90]
+                percent_match = re.search(r"(\d{1,3}(?:\.\d+)?)\s*%", after)
+                if not percent_match:
+                    percent_match = re.search(r"(?:around|approx(?:imately)?|about|near|roughly)?\s*(\d{1,3}(?:\.\d+)?)\s*percent", after, flags=re.IGNORECASE)
+                if percent_match:
+                    distance = percent_match.start()
+                    value = float(percent_match.group(1))
+                    if 0 <= value <= 100:
+                        candidates.append((distance, value))
+        if not candidates:
+            return []
+        candidates.sort(key=lambda item: item[0])
+        return [candidates[0][1]]
+
+    def _label_variants(self, label_terms: List[str]) -> List[str]:
+        escaped = [re.escape(term) for term in label_terms if term]
+        if not escaped:
+            return []
+        variants = []
+        if len(escaped) == 1:
+            variants.append(r"\b" + escaped[0] + r"\b")
+        else:
+            variants.append(r"\b" + r"[\s/_&+\-]*".join(escaped) + r"\b")
+            variants.append(r"\b" + r".{0,20}".join(escaped) + r"\b")
+        return variants
+
+    def _numbers_from_text(self, text: str) -> List[float]:
+        return [value for value, _ in self._numbers_with_context(text)]
+
+    def _numbers_with_context(self, text: str) -> List[Tuple[float, Dict[str, bool]]]:
+        values: List[float] = []
+        contextual: List[Tuple[float, Dict[str, bool]]] = []
+        for match in re.finditer(r"(?:[$€£₹]\s*|\b(?:usd|eur|gbp|inr|dollars?)\s*)?(\d[\d,]*(?:\.\d+)?)", text or "", flags=re.IGNORECASE):
+            try:
+                value = float(match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            after = (text or "")[match.end(): match.end() + 8].lower()
+            before = (text or "")[max(0, match.start() - 12): match.start()].lower()
+            contextual.append((value, {
+                "is_percent": bool(re.match(r"\s*%", after)) or "percent" in after[:8],
+                "has_currency_marker": bool(re.search(r"[$€£₹]|usd|eur|gbp|inr|dollars?", before + after, flags=re.IGNORECASE)),
+                "is_list_marker": bool(re.match(r"^\s*\d+[\.)]", (text or "")[: match.end()])),
+                "start": match.start(),
+                "end": match.end(),
+            }))
+        return contextual
+
+    def _generic_currency_anchor(self, evidence_text: str, unit: str = "", label: str = "", metric: str = "") -> float | None:
+        scored_values: List[Tuple[float, int, float]] = []
+        for line_no, line in enumerate((evidence_text or "").splitlines()):
+            line_l = line.lower()
+            if not re.search(r"\b(price|cost|value|usd|dollars?|\$|eur|gbp|inr|kwh|metric ton|tonne|barrel)\b", line_l):
+                continue
+            if metric == "cost" and "kwh" in str(unit).lower() and not re.search(r"\b(kwh|pack|battery\s+cost|cell\s+cost)\b", line_l):
+                continue
+            for value, context in self._numbers_with_context(line):
+                if value <= 0 or 1900 <= value <= 2100 or context.get("is_percent"):
+                    continue
+                value = self._normalize_currency_value(value, line_l, unit, label)
+                score = 1.0 + (2.0 if re.search(r"\b(current|latest|spot|benchmark|as of|today)\b", line_l) else 0.0)
+                scored_values.append((score, line_no, value))
+        if not scored_values:
+            return None
+        scored_values.sort(key=lambda item: (item[0], item[1]))
+        return scored_values[-1][2]
+
+    def _meaningful_label_terms(self, value: str) -> List[str]:
+        stopwords = {
+            "the", "and", "for", "from", "with", "into", "onto", "rate", "share",
+            "price", "cost", "value", "index", "count", "probability", "global",
+            "statewide", "overall", "numeric", "output", "outputs", "forecast",
+            "scenario", "case", "simulation", "pocket", "current", "baseline",
+        }
+        terms = []
+        for term in re.split(r"[_\s/()\-]+", str(value or "").lower()):
+            if len(term) < 3 or term in stopwords:
+                continue
+            terms.append(term)
+        return terms
+
+    def _line_matches_label(self, line_l: str, terms: List[str], min_matches: int = 1) -> bool:
+        if not terms:
+            return False
+        tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", line_l))
+        matches = sum(1 for term in terms if term in tokens or term in line_l)
+        return matches >= max(1, min_matches)
+
+    def _normalize_currency_value(self, value: float, line_l: str, unit: str, target_name: str) -> float:
+        unit_l = f"{unit} {target_name}".lower()
+        if "metric ton" in unit_l or "tonne" in unit_l or "per_ton" in unit_l or "per_metric_ton" in unit_l:
+            if re.search(r"\busd\s*/?\s*kg\b|\bper\s+kg\b|\bkg\b", line_l) and value < 1000:
+                return value * 1000.0
+        if "kwh" in unit_l and value > 1000 and not re.search(r"\bkwh\b", line_l):
+            return value / 1000.0
+        return value
+
+    def _is_unit_scale_mismatch(self, value: float, line_l: str, unit: str) -> bool:
+        unit_l = str(unit or "").lower()
+        if "metric ton" in unit_l or "tonne" in unit_l or "per_metric_ton" in unit_l:
+            if value < 100 and not re.search(r"\b(usd\s*/?\s*kg|per\s+kg|/kg|kg)\b", line_l):
+                return True
+        if "kwh" in unit_l and value > 1000 and not re.search(r"\bkwh\b", line_l):
+            return True
+        return False
+
+    def _default_rate_anchor(self, label: str, metric: str) -> float:
+        label_l = str(label or "").lower()
+        if metric in {"vote_share", "seat_share", "share"}:
+            return 35.0
+        if metric == "turnout":
+            return 60.0
+        if metric in {"growth_rate", "growth", "rate"}:
+            if any(term in label_l for term in ["storage", "adoption", "demand"]):
+                return 18.0
+            if any(term in label_l for term in ["supply", "mine", "production"]):
+                return 8.0
+            return 10.0
+        if metric == "index":
+            return 50.0
+        return 50.0
+
+    def _default_currency_anchor(self, label: str, unit: str, metric: str) -> float | None:
+        unit_l = str(unit or "").lower()
+        label_l = str(label or "").lower()
+        if "kwh" in unit_l:
+            return 100.0
+        if "barrel" in unit_l:
+            return 75.0
+        if "metric ton" in unit_l or "tonne" in unit_l or "per_ton" in unit_l:
+            if any(term in label_l for term in ["concentrate", "feedstock", "ore", "raw"]):
+                return 1200.0
+            return 10000.0
+        if "kg" in unit_l:
+            return 10.0
+        if metric in {"revenue", "capex"}:
+            return 100.0
+        return 100.0
 
     def _agent_numeric_bias(self, agent: Dict[str, Any], label: str, target_name: str) -> float:
         text = " ".join([
@@ -359,6 +1096,8 @@ class StructuredSimulationRunner:
         scenario_l = str(scenario or "").lower()
         if metric in {"seats", "count"}:
             return 0.8 if any(term in scenario_l for term in ["surge", "resilience", "upside"]) else -0.2
+        if metric in {"price", "cost", "value", "premium", "revenue", "capex"}:
+            return 1.0 if any(term in scenario_l for term in ["surge", "upside", "bull", "high", "deficit"]) else -0.25
         return 0.25 if any(term in scenario_l for term in ["surge", "resilience", "upside"]) else -0.05
 
     def _probability_anchor_from_target(self, label: str, scenario: str) -> float:
@@ -378,14 +1117,51 @@ class StructuredSimulationRunner:
     def _extract_total_count(self, evidence_text: str) -> float:
         match = None
         for pattern in [
-            r"(?:assembly size|total seats|seats)\s*[:=]?\s*(\d{2,4})",
-            r"(\d{2,4})\s+seats",
+            r"(?:assembly size|legislative assembly size|total seats|seat total|seats total)\s*[:=]?\s*(\d{2,4})",
+            r"\bassembly\b[^\n]{0,30}?\(?(\d{2,4})\s+seats",
+            r"(?:majority mark|majority threshold)\s*[:=]?\s*(\d{2,4})",
         ]:
             match = match or re.search(pattern, evidence_text or "", flags=re.IGNORECASE)
         if not match:
-            return 0.0
+            inferred = self._infer_total_count_from_historical_rows(evidence_text)
+            return inferred if inferred else 0.0
         value = float(match.group(1))
+        matched_text = match.group(0).lower()
+        if "majority" in matched_text:
+            value = (value - 1) * 2
         return value if 1 <= value <= 10000 else 0.0
+
+    def _infer_total_count_from_historical_rows(self, evidence_text: str) -> float:
+        """Infer a contest-size denominator from comparable historical rows.
+
+        This is a generic fallback for prompts that list party seat counts but
+        omit a total. It avoids treating seat forecasts as a 0-100 index.
+        """
+        row_totals: List[float] = []
+        for line in (evidence_text or "").splitlines():
+            line_l = line.lower()
+            if not re.search(r"\b(assembly|legislative|state election|seat)\b", line_l):
+                continue
+            if re.search(r"\b(lok sabha|parliament|ls)\b", line_l) and not re.search(r"assembly[- ]segment", line_l):
+                continue
+            seat_part = re.split(
+                r"\b(?:approx(?:imate)? vote share|vote share|turnout|main meaning|issues?)\b",
+                line,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+            values = []
+            for match in re.finditer(r"\b[A-Za-z][A-Za-z()/&+.' -]{1,40}\s+(\d{1,4})(?=\s*(?:seats?|,|\.|$|\)))", seat_part):
+                value = float(match.group(1))
+                if value in {1900, 2000, 2011, 2014, 2016, 2019, 2021, 2024, 2026}:
+                    continue
+                if 0 < value < 1000:
+                    values.append(value)
+            if len(values) >= 2:
+                total = sum(values)
+                if 20 <= total <= 10000:
+                    row_totals.append(total)
+        return max(row_totals) if row_totals else 0.0
 
     def _confidence(self, agent: Dict[str, Any], target_name: str, evidence_text: str) -> float:
         base = 0.62 + self._stable_jitter(agent.get("agent_id"), target_name, "confidence", evidence_text, span=0.2)
@@ -459,12 +1235,126 @@ class StructuredSimulationRunner:
         vote_targets = [name for name in target_names if self._is_composition_target(name, "_vote_share")]
         seat_targets = [name for name in target_names if self._is_composition_target(name, "_seats")]
         total_seats = self._extract_total_count(evidence_text) or None
+        exclusive_probability_targets = self._exclusive_probability_targets(target_names)
 
         for scenario_values in scenarios.values():
             self._normalize_points_to_total(scenario_values, vote_targets, 100.0)
             if total_seats:
-                self._normalize_points_to_total(scenario_values, seat_targets, total_seats, integer=True)
+                self._normalize_points_to_total(scenario_values, seat_targets, total_seats, integer=True, use_residual=False)
+            self._normalize_points_to_total(scenario_values, exclusive_probability_targets, 100.0, use_residual=False)
+            self._align_probability_outputs_with_counts(scenario_values, target_names, seat_targets)
         return scenarios
+
+    def _exclusive_probability_targets(self, target_names: List[str]) -> List[str]:
+        """Return probability targets that describe mutually exclusive outcomes."""
+        selected = []
+        for name in target_names:
+            lowered = name.lower()
+            if not lowered.startswith("probability_"):
+                continue
+            if any(term in lowered for term in ["cross", "above", "below", "over", "under", "threshold"]):
+                continue
+            if any(term in lowered for term in ["majority", "win", "winner", "hung", "draw", "no_majority", "plurality"]):
+                selected.append(name)
+        return selected if len(selected) >= 2 else []
+
+    def _align_probability_outputs_with_counts(
+        self,
+        scenario_values: Dict[str, Any],
+        target_names: List[str],
+        count_targets: List[str],
+    ) -> None:
+        """Keep probability outputs consistent with related count/seat paths."""
+        if not count_targets:
+            return
+        probability_targets = [name for name in target_names if name.lower().startswith("probability_")]
+        if not probability_targets:
+            return
+        dates = sorted({
+            str(point.get("date"))
+            for target in count_targets
+            for point in scenario_values.get(target, []) or []
+            if point.get("date") is not None
+        })
+        for date in dates:
+            counts = {}
+            for target in count_targets:
+                point = next((p for p in scenario_values.get(target, []) or [] if str(p.get("date")) == date), None)
+                if point is not None:
+                    counts[target[: -len("_seats")]] = float(point.get("value") or 0)
+            if len(counts) < 2:
+                continue
+            total = sum(counts.values())
+            if total <= 0:
+                continue
+            majority = total / 2.0 + 0.5
+            winner, winner_count = max(counts.items(), key=lambda item: item[1])
+            margin = winner_count - majority
+
+            exclusive_targets = self._exclusive_probability_targets(probability_targets)
+            if exclusive_targets:
+                assigned = {}
+                hung_target = next((target for target in exclusive_targets if "hung" in target.lower() or "no_majority" in target.lower()), None)
+                actor_targets = [
+                    target for target in exclusive_targets
+                    if target != hung_target
+                ]
+                if margin >= 0:
+                    winner_probability = min(82.0, max(55.0, 58.0 + margin / max(total, 1.0) * 220.0))
+                    hung_probability = max(8.0, min(32.0, 28.0 - margin / max(total, 1.0) * 90.0))
+                    remaining = max(0.0, 100.0 - winner_probability - hung_probability)
+                    other_actor_targets = [
+                        target for target in actor_targets
+                        if not self._probability_target_matches_actor(target, winner)
+                    ]
+                    for target in actor_targets:
+                        assigned[target] = winner_probability if self._probability_target_matches_actor(target, winner) else (
+                            remaining / max(1, len(other_actor_targets))
+                        )
+                    if hung_target:
+                        assigned[hung_target] = hung_probability
+                else:
+                    hung_probability = min(78.0, max(45.0, 52.0 + abs(margin) / max(total, 1.0) * 120.0))
+                    remaining = max(0.0, 100.0 - hung_probability)
+                    for target in actor_targets:
+                        actor = self._actor_from_probability_target(target)
+                        count = counts.get(actor, 0.0)
+                        assigned[target] = remaining * count / max(1.0, sum(counts.get(self._actor_from_probability_target(item), 0.0) for item in actor_targets))
+                    if hung_target:
+                        assigned[hung_target] = hung_probability
+                self._write_probability_points(scenario_values, assigned, date)
+
+            threshold_assignments = {}
+            for target in probability_targets:
+                match = re.search(r"^probability_(.+?)_cross(?:es)?_(\d{1,5})(?:_[a-z][a-z0-9_]*)?$", target.lower())
+                if not match:
+                    continue
+                actor = match.group(1)
+                threshold = float(match.group(2))
+                count = counts.get(actor)
+                if count is None:
+                    continue
+                gap = count - threshold
+                probability = 50.0 + gap / max(total, 1.0) * 180.0
+                threshold_assignments[target] = max(5.0, min(95.0, probability))
+            self._write_probability_points(scenario_values, threshold_assignments, date)
+
+    def _actor_from_probability_target(self, target: str) -> str:
+        label = target.lower().replace("probability_", "", 1)
+        label = re.sub(r"_cross(?:es)?_\d{1,5}(?:_[a-z][a-z0-9_]*)?$", "", label)
+        label = re.sub(r"_(?:majority|win|winner|plurality)$", "", label)
+        return label
+
+    def _probability_target_matches_actor(self, target: str, actor: str) -> bool:
+        return self._actor_from_probability_target(target) == actor
+
+    def _write_probability_points(self, scenario_values: Dict[str, Any], assignments: Dict[str, float], date: str) -> None:
+        for target, value in assignments.items():
+            for point in scenario_values.get(target, []) or []:
+                if str(point.get("date")) == date:
+                    point["value"] = round(float(value), 2)
+                    point["probability_aligned_to_counts"] = True
+                    break
 
     def _normalize_points_to_total(
         self,
@@ -472,6 +1362,7 @@ class StructuredSimulationRunner:
         target_names: List[str],
         total: float,
         integer: bool = False,
+        use_residual: bool = True,
     ) -> None:
         if len(target_names) < 2:
             return
@@ -497,7 +1388,7 @@ class StructuredSimulationRunner:
                 ),
                 None,
             )
-            if residual_idx is not None and len(points) == len(target_names):
+            if use_residual and residual_idx is not None and len(points) == len(target_names):
                 subtotal_without_residual = sum(
                     float(point.get("value") or 0)
                     for idx, point in enumerate(points)
@@ -542,7 +1433,21 @@ class StructuredSimulationRunner:
         base = scenario_outputs.get(base_key) or {}
         seat_targets = [str(target.get("name") or "") for target in targets if self._is_composition_target(str(target.get("name") or ""), "_seats")]
         vote_targets = [str(target.get("name") or "") for target in targets if self._is_composition_target(str(target.get("name") or ""), "_vote_share")]
-        final: Dict[str, Any] = {"scenario": base_key, "seat_forecast": {}, "vote_share_forecast": {}}
+        final: Dict[str, Any] = {
+            "scenario": base_key,
+            "seat_forecast": {},
+            "vote_share_forecast": {},
+            "target_forecast": {},
+        }
+        for target in [str(item.get("name") or "") for item in targets if item.get("name")]:
+            points = base.get(target) or []
+            if points:
+                final["target_forecast"][target] = {
+                    "date": points[-1].get("date"),
+                    "value": points[-1].get("value"),
+                    "agent_count": points[-1].get("agent_count"),
+                    "unit": next((item.get("unit") for item in targets if item.get("name") == target), ""),
+                }
         for target in seat_targets:
             points = base.get(target) or []
             if points:
@@ -644,6 +1549,7 @@ class StructuredSimulationRunner:
             if agent_id and target:
                 revisions_by_key.setdefault((agent_id, target), []).append(revision)
 
+        final_pocket_idx = max(0, len(time_pockets) - 1)
         updated_outputs = []
         for output in agent_outputs:
             output = dict(output)
@@ -672,13 +1578,28 @@ class StructuredSimulationRunner:
             if not adjustments:
                 updated_outputs.append(output)
                 continue
+            max_period_idx = max(
+                [int(point.get("period_index") or 0) for point in path] or [final_pocket_idx]
+            )
             for point in path:
-                point_idx = pocket_order.get(point.get("date"), 0)
+                # Forecast dates often represent the requested future horizon,
+                # not a debate-pocket label. Unknown dates should still receive
+                # accumulated debate revisions rather than silently staying
+                # unchanged.
+                try:
+                    point_idx = int(point.get("period_index"))
+                except (TypeError, ValueError):
+                    point_idx = pocket_order.get(point.get("date"), final_pocket_idx)
                 total_delta = 0.0
                 for adjustment in adjustments:
-                    if point_idx < adjustment["pocket_idx"]:
+                    debate_threshold = self._map_pocket_index_to_period_index(
+                        adjustment["pocket_idx"],
+                        final_pocket_idx,
+                        max_period_idx,
+                    )
+                    if point_idx < debate_threshold:
                         continue
-                    distance = point_idx - adjustment["pocket_idx"]
+                    distance = point_idx - debate_threshold
                     carry = max(0.25, 1.0 - distance * 0.12)
                     scenario_weight = self._scenario_revision_weight(point.get("scenario"))
                     total_delta += adjustment["delta"] * carry * scenario_weight
@@ -690,6 +1611,12 @@ class StructuredSimulationRunner:
             output["debate_revisions_applied"] = relevant
             updated_outputs.append(output)
         return updated_outputs
+
+    def _map_pocket_index_to_period_index(self, pocket_idx: int, final_pocket_idx: int, max_period_idx: int) -> int:
+        if final_pocket_idx <= 0 or max_period_idx <= 0:
+            return 0
+        ratio = max(0.0, min(1.0, float(pocket_idx) / float(final_pocket_idx)))
+        return int(round(ratio * max_period_idx))
 
     def _scenario_revision_weight(self, scenario: str) -> float:
         scenario_l = str(scenario or "").lower()
@@ -703,10 +1630,20 @@ class StructuredSimulationRunner:
 
     def _bounded_value(self, current_value: Any, delta: float, unit: str) -> float:
         try:
-            value = float(current_value) + delta
+            current = float(current_value)
         except (TypeError, ValueError):
-            value = delta
+            current = 0.0
         lowered = str(unit or "").lower()
+        capped_delta = delta
+        if any(term in lowered for term in ["percent", "probability", "index", "share", "rate"]):
+            capped_delta = max(-8.0, min(8.0, delta))
+        elif any(term in lowered for term in ["usd", "currency", "price", "cost", "revenue", "capex"]):
+            cap = max(1.0, abs(current) * 0.18)
+            capped_delta = max(-cap, min(cap, delta))
+        elif any(term in lowered for term in ["month", "count", "seat", "number"]):
+            cap = max(1.0, abs(current) * 0.20)
+            capped_delta = max(-cap, min(cap, delta))
+        value = current + capped_delta
         if any(term in lowered for term in ["percent", "probability", "index", "share", "rate"]):
             return round(max(0.0, min(100.0, value)), 2)
         return round(max(0.0, value), 2)
@@ -779,10 +1716,20 @@ class StructuredSimulationRunner:
         state: StructuredSimulationState,
         targets: List[Dict[str, Any]],
         evidence_text: str,
+        graph_brain: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         transcript: List[Dict[str, Any]] = []
         output_index = self._index_agent_outputs(state.agent_outputs)
+        graph_brain = graph_brain or {}
         evidence_notes = self._extract_evidence_notes(evidence_text)
+        evidence_notes = [
+            note for note in list(dict.fromkeys((graph_brain.get("evidence_cards") or []) + evidence_notes))
+            if not self._is_bad_evidence_card(note)
+        ]
+        if not evidence_notes:
+            evidence_notes = [
+                "No clean factual evidence cards were extracted; treat this run as prompt-only and mark factual confidence low."
+            ]
         key_targets = [target.get("name") for target in targets[:6] if target.get("name")]
         relationship_topology = state.aggregated_outputs.get("relationship_topology") or []
 
@@ -801,6 +1748,21 @@ class StructuredSimulationRunner:
                     "it would revise next."
                 ),
                 turn_type="frame",
+            ))
+            transcript.append(self._turn(
+                pocket_id,
+                label,
+                "graph_brain",
+                "Signal Map Conscience",
+                self._graph_conscience_turn(graph_brain, label, key_targets),
+                turn_type="graph_intervention",
+                metadata={
+                    "graph_id": graph_brain.get("graph_id"),
+                    "actor_count": graph_brain.get("actor_count"),
+                    "target_count": graph_brain.get("target_count"),
+                    "numeric_fact_count": graph_brain.get("numeric_fact_count"),
+                    "missing_target_evidence": graph_brain.get("missing_target_evidence", []),
+                },
             ))
             transcript.append(self._turn(
                 pocket_id,
@@ -830,16 +1792,24 @@ class StructuredSimulationRunner:
                     label,
                     agent,
                 )
+                rag_adjustment = self._agent_rag_adjustment(
+                    agent=agent,
+                    graph_brain=graph_brain,
+                    evidence_notes=evidence_notes,
+                    target=forecast_sample.get("target_variable") or "",
+                    pocket_label=label,
+                )
                 causal_context.append({
                     "agent": agent,
                     "forecast_sample": forecast_sample,
+                    "rag_adjustment": rag_adjustment,
                 })
                 transcript.append(self._turn(
                     pocket_id,
                     label,
                     agent.get("agent_id"),
                     agent.get("name"),
-                    self._agent_argument(agent, pocket, state.domain_plan, evidence_notes, forecast_sample),
+                    self._agent_argument(agent, pocket, state.domain_plan, evidence_notes, forecast_sample, rag_adjustment),
                     turn_type="agent_argument",
                     metadata={
                         "role": agent.get("role"),
@@ -847,6 +1817,7 @@ class StructuredSimulationRunner:
                         "base_value": forecast_sample.get("base"),
                         "downside_value": forecast_sample.get("downside"),
                         "confidence": forecast_sample.get("confidence"),
+                        "rag_adjustment": rag_adjustment,
                     },
                 ))
 
@@ -891,6 +1862,25 @@ class StructuredSimulationRunner:
                 turn_type="numeric_synthesis",
             ))
         return transcript
+
+    def _graph_conscience_turn(self, graph_brain: Dict[str, Any], pocket_label: str, key_targets: List[str]) -> str:
+        if not graph_brain:
+            return (
+                f"Graph conscience for `{pocket_label}`: no graph context was passed into this run. "
+                "Treat this as degraded mode; auditor and research scout must explicitly label missing evidence."
+            )
+        actors = ", ".join((graph_brain.get("actor_roster_preview") or [])[:10]) or "no actor roster"
+        warnings = " | ".join(graph_brain.get("warnings") or []) or "no graph warnings"
+        interventions = " | ".join((graph_brain.get("intervention_plan") or [])[:4])
+        evidence_preview = " | ".join((graph_brain.get("evidence_cards") or [])[:3]) or "no evidence cards extracted"
+        return (
+            f"Graph conscience for `{pocket_label}`: I see `{graph_brain.get('actor_count', 0)}` actor nodes, "
+            f"`{graph_brain.get('target_count', 0)}` target variables, `{graph_brain.get('numeric_fact_count', 0)}` numeric facts, "
+            f"and `{graph_brain.get('evidence_claim_count', 0)}` evidence claims. Actor lane preview: {actors}. "
+            f"Target lane preview: {', '.join(key_targets)}. Evidence preview: {evidence_preview}. "
+            f"Warnings: {warnings}. Intervention order: {interventions}. "
+            "If a speaker drifts away from these lanes, I will force a correction before the next pocket."
+        )
 
     def _debate_rounds(
         self,
@@ -953,6 +1943,42 @@ class StructuredSimulationRunner:
             turns.append(self._turn(
                 pocket_id,
                 label,
+                "moderator",
+                "Simulation Moderator",
+                self._moderator_cross_question(
+                    claimant=claimant,
+                    challenger=challenger,
+                    claimant_sample=claimant_sample,
+                    challenger_sample=challenger_sample,
+                    contested_target=contested_target,
+                    round_idx=round_idx,
+                ),
+                turn_type="moderator_cross_question",
+                metadata={
+                    "round": round_idx,
+                    "contested_target": contested_target,
+                },
+            ))
+            turns.append(self._turn(
+                pocket_id,
+                label,
+                "research",
+                "External Research Scout",
+                self._research_check_turn(
+                    challenger=challenger,
+                    contested_target=contested_target,
+                    evidence_notes=evidence_notes,
+                    pocket_label=label,
+                ),
+                turn_type="research_check",
+                metadata={
+                    "round": round_idx,
+                    "contested_target": contested_target,
+                },
+            ))
+            turns.append(self._turn(
+                pocket_id,
+                label,
                 claimant.get("agent_id"),
                 claimant.get("name"),
                 self._rebuttal_message(
@@ -969,6 +1995,25 @@ class StructuredSimulationRunner:
                 metadata={
                     "round": round_idx,
                     "challenger_agent_id": challenger.get("agent_id"),
+                    "contested_target": contested_target,
+                },
+            ))
+            turns.append(self._turn(
+                pocket_id,
+                label,
+                "quant",
+                "Quantitative Synthesizer",
+                self._quant_check_turn(
+                    claimant=claimant,
+                    challenger=challenger,
+                    claimant_sample=claimant_sample,
+                    challenger_sample=challenger_sample,
+                    contested_target=contested_target,
+                    round_idx=round_idx,
+                ),
+                turn_type="quant_check",
+                metadata={
+                    "round": round_idx,
                     "contested_target": contested_target,
                 },
             ))
@@ -1021,12 +2066,26 @@ class StructuredSimulationRunner:
             for ctx in causal_context
             if (ctx.get("agent") or {}).get("agent_id")
         }
+        numeric_contexts = [
+            ctx for ctx in causal_context
+            if (ctx.get("forecast_sample") or {}).get("base") not in (None, "")
+        ]
+        non_numeric_contexts = [
+            ctx for ctx in causal_context
+            if (ctx.get("forecast_sample") or {}).get("base") in (None, "")
+        ]
         for edge in relationship_topology:
             if edge.get("relationship_type") not in {"opposes", "challenges_assumption", "audits", "information_gap"}:
                 continue
             claimant = by_id.get(edge.get("target_agent_id"))
             challenger = by_id.get(edge.get("source_agent_id"))
             if not claimant or not challenger:
+                continue
+            claimant_has_number = (claimant.get("forecast_sample") or {}).get("base") not in (None, "")
+            challenger_has_number = (challenger.get("forecast_sample") or {}).get("base") not in (None, "")
+            if not claimant_has_number and challenger_has_number:
+                claimant, challenger = challenger, claimant
+            elif not claimant_has_number and not challenger_has_number:
                 continue
             key = (edge.get("target_agent_id"), edge.get("source_agent_id"))
             if key in seen:
@@ -1036,14 +2095,6 @@ class StructuredSimulationRunner:
             if len(pairs) >= 4:
                 break
 
-        numeric_contexts = [
-            ctx for ctx in causal_context
-            if (ctx.get("forecast_sample") or {}).get("base") not in (None, "")
-        ]
-        non_numeric_contexts = [
-            ctx for ctx in causal_context
-            if (ctx.get("forecast_sample") or {}).get("base") in (None, "")
-        ]
         for claimant in numeric_contexts:
             challenger = self._best_generic_challenger(claimant, non_numeric_contexts or causal_context, seen)
             if not challenger:
@@ -1139,14 +2190,15 @@ class StructuredSimulationRunner:
             has_numeric = sample.get("base") is not None
             evidence_score = min(100, 35 + len(evidence) * 15 + (15 if any(re.search(r"\d", fact) for fact in evidence) else 0))
             contribution_type = self._agent_contribution_type(agent)
+            rag_adjustment = ctx.get("rag_adjustment") or {}
             scored.append({
                 "name": agent.get("name"),
                 "contribution_type": contribution_type,
                 "target": sample.get("target_variable") or "non-numeric influence",
                 "has_numeric": has_numeric,
                 "evidence_score": evidence_score,
-                "numeracy": cognitive.get("numeracy_score", "n/a"),
-                "local": cognitive.get("local_knowledge_score", "n/a"),
+                "rag_confidence_delta": rag_adjustment.get("confidence_delta", 0),
+                "graph_support": rag_adjustment.get("support_level", "unknown"),
                 "posture": stakes.get("strategic_posture", "n/a"),
             })
 
@@ -1158,6 +2210,7 @@ class StructuredSimulationRunner:
             f"Strongest evidence-backed contributions: {self._compact_eval_items(strongest)}. "
             f"Weak or under-supported lanes needing follow-up: {self._compact_eval_items(weak) if weak else 'none above threshold'}. "
             f"Non-quant stakeholder signals to carry forward without forcing fake numbers: {self._compact_eval_items(non_numeric) if non_numeric else 'none'}. "
+            "RAG adjustment rule: agents with direct graph support keep more confidence; agents with thin evidence are carried as hypotheses. "
             "Direction for next stage: Research Scout must find or expose missing source pointers for weak lanes; "
             "Data Retrieval Analyst must extract denominators/units; Quantitative Synthesizer may only adjust numeric paths from numeric-capable agents; "
             "common/ground agents should update behavioral pressure, trust, participation, demand, or refusal signals rather than pretend to be forecasters."
@@ -1165,7 +2218,8 @@ class StructuredSimulationRunner:
 
     def _compact_eval_items(self, items: List[Dict[str, Any]]) -> str:
         return "; ".join(
-            f"{item.get('name')}[{item.get('contribution_type')}, target={item.get('target')}, evidence={item.get('evidence_score')}, posture={item.get('posture')}]"
+            f"{item.get('name')} ({item.get('contribution_type')}; target={item.get('target')}; "
+            f"evidence={item.get('evidence_score')}; graph support={item.get('graph_support')}; posture={item.get('posture')})"
             for item in items
         )
 
@@ -1270,16 +2324,12 @@ class StructuredSimulationRunner:
         return "information_gap"
 
     def _relationship_rationale(self, source: Dict[str, Any], target: Dict[str, Any], relationship_type: str) -> str:
-        source_cog = source.get("cognitive_profile") if isinstance(source.get("cognitive_profile"), dict) else {}
-        target_cog = target.get("cognitive_profile") if isinstance(target.get("cognitive_profile"), dict) else {}
         source_stakes = source.get("stakes_profile") if isinstance(source.get("stakes_profile"), dict) else {}
         target_stakes = target.get("stakes_profile") if isinstance(target.get("stakes_profile"), dict) else {}
         return (
-            f"{relationship_type} because {source.get('name')} has "
-            f"{source_cog.get('game_theory_style', 'a different strategic lens')} and skin in the game "
-            f"`{source_stakes.get('skin_in_the_game', 'not specified')}`, while {target.get('name')} has "
-            f"`{target_stakes.get('skin_in_the_game', 'not specified')}` and a different evidence/skill profile "
-            f"(local={target_cog.get('local_knowledge_score', 'n/a')}, numeracy={target_cog.get('numeracy_score', 'n/a')})."
+            f"{source.get('name')} is likely to test {target.get('name')} because their incentives differ: "
+            f"{source.get('name')} is exposed to `{source_stakes.get('skin_in_the_game', 'not specified')}`, "
+            f"while {target.get('name')} is exposed to `{target_stakes.get('skin_in_the_game', 'not specified')}`."
         )
 
     def _relationship_between(
@@ -1329,12 +2379,15 @@ class StructuredSimulationRunner:
         background = self._background_claim(challenger)
         relation = self._relationship_clause(relationship)
         pressure = self._numeric_pressure(claimant_base, challenger_base)
+        evidence_status = self._evidence_status_line(evidence_notes, contested_target, challenger)
+        challenger_claim = self._agent_claim_from_fields(challenger, contested_target)
         return (
-            f"{claimant_name}, I am challenging your `{contested_target}` base `{claimant_base}`. "
-            f"{relation}{background} The weak assumption is: {axis}. {fact_basis} "
-            f"My narrower evidence lane is {evidence}. "
-            f"Your downside `{claimant_downside}` is not enough if this channel is real; {pressure}. "
-            f"In this round, do not restate your position. Tell us which assumption you will actually cut, defend, or reweight."
+            f"{challenger_name}: {claimant_name}, I challenge `{contested_target} = {claimant_base}`. "
+            f"My counter-read is `{challenger_base}`. {evidence_status} "
+            f"My actual claim is: {challenger_claim}. "
+            f"The weak link is {axis}. {fact_basis} "
+            f"Your stress case `{claimant_downside}` still looks too neat; {pressure}. "
+            "Answer one thing: what single assumption would you cut first if my lane is right?"
         )
 
     def _rebuttal_message(
@@ -1367,12 +2420,14 @@ class StructuredSimulationRunner:
         )
         background = self._background_claim(claimant)
         relation = self._relationship_clause(relationship)
+        evidence_status = self._evidence_status_line(evidence_notes, contested_target, claimant)
+        claimant_claim = self._agent_claim_from_fields(claimant, contested_target)
         return (
-            f"{challenger_name}, I accept the challenge on `{contested_target}` but not your full conclusion. "
-            f"{relation}{background} I am defending this part: {axis}. {fact_basis} "
-            f"My counter-evidence lane is {defense}. "
-            f"I will provisionally move my base from `{claimant_base}` to `{revised}` for this debate round, "
-            "but only if the next pocket confirms the mechanism rather than just the headline signal."
+            f"{claimant_name}: {challenger_name}, I’ll concede partial weight, not the whole case. "
+            f"{evidence_status} I still defend this claim: {claimant_claim}. "
+            f"The part I am defending is {axis}. {fact_basis} "
+            f"Counter-evidence I can cite: {self._short_card(defense, max_len=240)}. "
+            f"I revise from `{claimant_base}` toward `{revised}` for now; if the next pocket cannot prove the mechanism, the revision should decay."
         )
 
     def _background_claim(self, agent: Dict[str, Any]) -> str:
@@ -1382,19 +2437,83 @@ class StructuredSimulationRunner:
         strong_topics = persona.get("speaks_strongly_about") or []
         pieces = []
         if background:
-            pieces.append(f"My background matters here: {background}")
+            pieces.append(self._short_card(background, max_len=170))
         if strong_topics:
-            pieces.append(f"I can speak strongly about {', '.join(str(topic) for topic in strong_topics[:4])}.")
+            pieces.append(f"The part I know best is {', '.join(str(topic) for topic in strong_topics[:4])}.")
         if boundary:
-            pieces.append(f"My boundary: {boundary}")
+            pieces.append(f"I may be wrong where {boundary}")
         return " ".join(pieces) + (" " if pieces else "")
 
     def _relationship_clause(self, relationship: Dict[str, Any]) -> str:
         if not relationship:
             return ""
         return (
-            f"Our relationship is `{relationship.get('relationship_type')}` "
-            f"(strength `{relationship.get('strength')}`): {relationship.get('rationale')}. "
+            "I’m pushing back because our incentives do not line up. "
+            f"{self._short_card(relationship.get('rationale'), max_len=150)}. "
+        )
+
+    def _moderator_cross_question(
+        self,
+        claimant: Dict[str, Any],
+        challenger: Dict[str, Any],
+        claimant_sample: Dict[str, Any],
+        challenger_sample: Dict[str, Any],
+        contested_target: str,
+        round_idx: int,
+    ) -> str:
+        spread = self._numeric_spread(claimant_sample.get("base"), challenger_sample.get("base"))
+        return (
+            f"Moderator: pause. We are arguing over `{contested_target}`, and the visible gap is `{spread}`. "
+            f"{claimant.get('name')}, name the input that changes first. "
+            f"{challenger.get('name')}, name the fact that would make you back off. "
+            "No falsifier, no full weight."
+        )
+
+    def _research_check_turn(
+        self,
+        challenger: Dict[str, Any],
+        contested_target: str,
+        evidence_notes: List[str],
+        pocket_label: str,
+    ) -> str:
+        role_l = f"{challenger.get('name', '')} {challenger.get('role', '')}".lower()
+        facts = self._select_fact_cards(
+            role_l=role_l,
+            evidence_notes=evidence_notes,
+            axis="live cross-check",
+            target=contested_target,
+            pocket_label=pocket_label,
+            limit=2,
+        )
+        if facts:
+            return (
+                f"Quick source check: I can support part of {challenger.get('name')}'s challenge with "
+                + " | ".join(facts)
+                + ". I am not saying it settles the argument; I am saying this is the evidence the room should test next."
+            )
+        return (
+            f"Quick source check: I cannot find a clean support card for {challenger.get('name')}'s challenge on `{contested_target}`. "
+            "Treat that claim as a hypothesis until the next research pass finds a source, date, unit, or denominator."
+        )
+
+    def _quant_check_turn(
+        self,
+        claimant: Dict[str, Any],
+        challenger: Dict[str, Any],
+        claimant_sample: Dict[str, Any],
+        challenger_sample: Dict[str, Any],
+        contested_target: str,
+        round_idx: int,
+    ) -> str:
+        original = claimant_sample.get("base")
+        challenger_value = challenger_sample.get("base")
+        revised = self._provisional_revision(original, challenger_value, round_idx)
+        spread = self._numeric_spread(original, challenger_value)
+        return (
+            f"Quant note: no blind averaging. `{claimant.get('name')}` starts at `{original}`; "
+            f"`{challenger.get('name')}` pulls toward `{challenger_value}`; spread `{spread}`. "
+            f"I carry only part of the challenge into `{contested_target}`, so the provisional number is `{revised}`. "
+            "Confirmed mechanisms get more weight later; unsupported pressure fades."
         )
 
     def _revision_note(
@@ -1411,10 +2530,10 @@ class StructuredSimulationRunner:
         revised = self._provisional_revision(claimant_base, challenger_base, round_idx)
         spread = self._numeric_spread(claimant_base, challenger_base)
         return (
-            f"Round {round_idx} revision record: `{claimant.get('name')}` and `{challenger.get('name')}` "
-            f"disagree on `{contested_target}` by approximately `{spread}` points. "
-            f"The provisional mediated value is `{revised}`. This is not final output yet; it is a debated state input "
-            "that should either harden or reverse in the next pocket."
+            f"Mediator ruling, round {round_idx}: this is a live disagreement, not a winner-take-all vote. "
+            f"`{claimant.get('name')}` and `{challenger.get('name')}` are `{spread}` apart on `{contested_target}`. "
+            f"The room carries forward `{revised}` as the provisional value. "
+            "Next pocket, this either earns more weight through evidence or gets pulled back."
         )
 
     def _challenge_axis(self, claimant: Dict[str, Any], challenger: Dict[str, Any]) -> str:
@@ -1459,6 +2578,12 @@ class StructuredSimulationRunner:
         pocket_label: str = "",
         limit: int = 3,
     ) -> List[str]:
+        clean_notes = [
+            note for note in evidence_notes
+            if not self._is_bad_evidence_card(note)
+        ]
+        if not clean_notes:
+            return []
         search_text = f"{role_l} {axis} {target} {pocket_label}".lower()
         wanted = {
             token for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_/-]{3,}", search_text)
@@ -1467,8 +2592,8 @@ class StructuredSimulationRunner:
         wanted.update(["seat", "vote", "share", "turnout", "price", "rate", "index", "probability", "risk", "region", "scenario"])
 
         scored = []
-        offset = self._stable_index(role_l, axis, target, pocket_label, modulo=max(1, len(evidence_notes)))
-        ordered_notes = evidence_notes[offset:] + evidence_notes[:offset]
+        offset = self._stable_index(role_l, axis, target, pocket_label, modulo=max(1, len(clean_notes)))
+        ordered_notes = clean_notes[offset:] + clean_notes[:offset]
         for note_idx, note in enumerate(ordered_notes):
             note_l = note.lower()
             score = sum(1 for term in wanted if term in note_l)
@@ -1517,11 +2642,12 @@ class StructuredSimulationRunner:
         return int(digest[:8], 16) % modulo
 
     def _loose_overlap(self, left: str, right: str) -> bool:
+        left = str(left or "").replace("_", " ").replace("-", " ")
         left_tokens = {
-            token for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_]{3,}", str(left).lower())
+            token for token in re.findall(r"[a-zA-Z][a-zA-Z0-9]{3,}", left.lower())
             if token not in {"phase", "case", "scenario", "forecast", "share", "rate"}
         }
-        right_l = str(right).lower()
+        right_l = str(right or "").replace("_", " ").replace("-", " ").lower()
         return any(token in right_l for token in left_tokens)
 
     def _note_section(self, note: str) -> str:
@@ -1615,13 +2741,18 @@ class StructuredSimulationRunner:
     def _forecast_sample(self, outputs: List[Dict[str, Any]], pocket_label: str, agent: Dict[str, Any] = None) -> Dict[str, Any]:
         if not outputs:
             return {}
-        preferred = self._preferred_output_for_agent(outputs, agent or {})
+        preferred = self._preferred_output_for_agent(outputs, agent or {}, pocket_label)
         points = preferred.get("forecast_path") or []
         sample = {
             "target_variable": preferred.get("target_variable"),
             "confidence": preferred.get("confidence"),
         }
         pocket_points = [point for point in points if point.get("date") == pocket_label]
+        if not pocket_points:
+            # Time-pocket labels and forecast-horizon dates are intentionally
+            # different concepts. Debate should still see the available numeric
+            # path when no pocket-specific date exists.
+            pocket_points = list(points)
         for point in pocket_points:
             scenario = str(point.get("scenario") or "")
             if scenario:
@@ -1636,19 +2767,20 @@ class StructuredSimulationRunner:
             sample["stress_scenario"] = stress.get("scenario")
         return sample
 
-    def _preferred_output_for_agent(self, outputs: List[Dict[str, Any]], agent: Dict[str, Any]) -> Dict[str, Any]:
+    def _preferred_output_for_agent(self, outputs: List[Dict[str, Any]], agent: Dict[str, Any], pocket_label: str = "") -> Dict[str, Any]:
         role_tokens = self._role_tokens(agent)
-        scored: List[Tuple[int, Dict[str, Any]]] = []
+        scored: List[Tuple[int, int, Dict[str, Any]]] = []
         for output in outputs:
             target_l = str(output.get("target_variable") or "").lower()
-            score = sum(1 for token in role_tokens if token in target_l)
+            role_score = sum(1 for token in role_tokens if token in target_l)
+            score = role_score
             if any(term in target_l for term in ["probability", "share", "rate", "seat", "price", "index", "turnout"]):
                 score += 1
-            scored.append((score, output))
+            scored.append((score, role_score, output))
         scored.sort(key=lambda item: item[0], reverse=True)
-        if scored and scored[0][0] > 0:
-            return scored[0][1]
-        return outputs[0]
+        if scored and scored[0][1] > 0:
+            return scored[0][2]
+        return outputs[self._stable_index(agent.get("agent_id"), pocket_label, "target_rotation", modulo=len(outputs))]
 
     def _role_tokens(self, agent: Dict[str, Any]) -> List[str]:
         text = f"{agent.get('name', '')} {agent.get('role', '')} {agent.get('archetype', '')}".lower()
@@ -1686,12 +2818,20 @@ class StructuredSimulationRunner:
             cleaned = re.sub(r"\s+", " ", line).strip(" -•\t")
             if not cleaned:
                 continue
+            if self._is_meta_instruction_note(cleaned):
+                continue
+            if self._looks_like_metric_request_line(cleaned):
+                continue
+            if self._is_bad_evidence_card(cleaned):
+                continue
             if self._looks_like_section_heading(cleaned):
                 current_section = cleaned[:80]
                 continue
             has_signal = bool(re.search(
                 r"\d|turnout|vote|seat|risk|advantage|poll|scenario|baseline|current|region|price|rate|share|probability|"
-                r"agent|voter|consumer|worker|household|campaign|alliance|policy|jobs|corruption|welfare|identity|supply|demand",
+                r"agent|voter|consumer|worker|household|campaign|alliance|policy|jobs|corruption|welfare|identity|supply|demand|"
+                r"canon|character|death|survive|betray|battle|throne|claim|prophecy|dragon|wall|winterfell|king|queen|lord|"
+                r"magic|reveal|secret|faction|house|army|fleet|city|court|regime|book|chapter",
                 cleaned,
                 re.IGNORECASE,
             ))
@@ -1701,11 +2841,52 @@ class StructuredSimulationRunner:
                 break
         return notes or ["The prompt provides the active evidence set; no external research packet was attached to this structured run."]
 
+    def _is_meta_instruction_note(self, cleaned: str) -> bool:
+        """Filter workflow instructions out of factual evidence cards."""
+        lowered = cleaned.lower()
+        if re.match(r"^(run|build|generate|create|produce|output|act as)\b", lowered) and re.search(
+            r"\b(simulation|structured|agent|report|transcript|numeric forecasts?|explain|required output)\b",
+            lowered,
+        ):
+            return True
+        if re.match(r"^(?:time[- ]pocket\s*)?pocket\s+\d+\s*:", lowered):
+            return True
+        if re.match(r"^(rules?|required outputs?|final prompt|task|your task|for every agent|each agent|agents must|agents should)\b", lowered):
+            return True
+        if re.search(
+            r"\b(?:do not use future|do not invent|do not produce|produce numeric|clearly separate facts|"
+            r"challenge another agent|what would change their view|cite evidence|make a concrete claim)\b",
+            lowered,
+        ):
+            return True
+        return False
+
+    def _looks_like_metric_request_line(self, cleaned: str) -> bool:
+        """Skip bare requested-output bullets so they are not treated as facts."""
+        lowered = cleaned.lower().strip(" .")
+        if ":" in lowered or len(lowered.split()) > 8:
+            return False
+        has_metric_words = bool(re.search(
+            r"\b(vote share|seat share|seats?|turnout|probability|confidence band|uncertainty band|index|forecast table)\b",
+            lowered,
+        ))
+        has_observed_language = bool(re.search(
+            r"\b(won|lost|got|received|around|approx|approximately|baseline|poll|survey|turnout around|actual)\b",
+            lowered,
+        ))
+        return has_metric_words and not has_observed_language
+
     def _looks_like_section_heading(self, cleaned: str) -> bool:
         if len(cleaned) > 90:
             return False
         if re.match(r"^\d{1,2}\.\s+", cleaned):
-            return True
+            title = re.sub(r"^\d{1,2}\.\s+", "", cleaned).strip()
+            title_l = title.lower().strip(": ")
+            return bool(re.search(
+                r"\b(baseline|context|setup|region|signals?|scenario|target|variables?|required|outputs?|rules?|"
+                r"question|summary|overview|history|historical|data|table|forecast|plan|pockets?|timeline|story|canon|evidence)\b",
+                title_l,
+            ))
         if cleaned.isupper() and len(cleaned.split()) <= 12:
             return True
         return bool(re.search(r"(baseline|context|region|signals|scenario|target variables|required output|rules)$", cleaned, re.IGNORECASE))
@@ -1719,10 +2900,16 @@ class StructuredSimulationRunner:
             pocket_label=pocket_label,
             limit=4,
         )
+        if not selected:
+            return (
+                "Research desk: I do not have a clean source packet for this pocket yet. "
+                "That is a warning, not a free pass. The room should keep claims provisional "
+                "until a source, date, unit, or comparable precedent is available."
+            )
         return (
-            "Source packet for this pocket: "
+            "Research desk: usable source cards for this pocket are "
             + " | ".join(selected)
-            + ". I am not adding unapproved post-cutoff facts; these are the evidence pointers agents may react to."
+            + ". I am not adding unapproved post-cutoff facts; I am handing the room only the evidence it is allowed to react to."
         )
 
     def _data_turn(self, evidence_text: str, targets: List[Dict[str, Any]], pocket_idx: int, pocket_label: str = "") -> str:
@@ -1736,9 +2923,14 @@ class StructuredSimulationRunner:
             pocket_label=pocket_label,
             limit=4,
         )
+        if not selected_anchors:
+            return (
+                f"Data desk: for `{target_names}`, I do not see clean numeric anchors in this pocket. "
+                "That means analysts can still argue directionally, but the quant layer should not pretend the input is well measured."
+            )
         return (
-            f"I extracted numeric anchors for `{target_names}`. Relevant evidence rows for this pocket: "
-            f"{' | '.join(selected_anchors) if selected_anchors else 'none detected'}. "
+            f"Data desk: for `{target_names}`, the numeric anchors I can actually point to are "
+            f"{' | '.join(selected_anchors)}. "
             "Numbers must be used as anchors, not as future actuals."
         )
 
@@ -1748,9 +2940,18 @@ class StructuredSimulationRunner:
             cleaned = re.sub(r"\s+", " ", line).strip(" -•\t")
             if not cleaned or len(cleaned) < 12:
                 continue
+            if self._is_meta_instruction_note(cleaned):
+                continue
+            if self._looks_like_metric_request_line(cleaned):
+                continue
+            if self._is_bad_evidence_card(cleaned):
+                continue
             has_number = bool(re.search(r"\d", cleaned))
             has_context = bool(re.search(
-                r"seat|vote|share|turnout|probability|index|poll|assembly|lok sabha|majority|phase|scenario|range|percent|%",
+                r"seat|vote|share|turnout|probability|index|poll|assembly|lok sabha|majority|phase|scenario|range|percent|%|"
+                r"price|pricing|cost|usd|dollar|kwh|mwh|gwh|twh|ton|tonne|metric|lithium|spodumene|carbonate|"
+                r"supply|demand|inventory|growth|margin|deficit|oversupply|sales|"
+                r"book|chapter|battle|army|fleet|death|survive|survival|throne|claim|dragon|house|king|queen|probability",
                 cleaned,
                 re.IGNORECASE,
             ))
@@ -1760,6 +2961,69 @@ class StructuredSimulationRunner:
                 break
         return anchors
 
+    def _agent_rag_adjustment(
+        self,
+        agent: Dict[str, Any],
+        graph_brain: Dict[str, Any],
+        evidence_notes: List[str],
+        target: str,
+        pocket_label: str,
+    ) -> Dict[str, Any]:
+        """Give each agent a graph/RAG steering note without turning it into a hard blocker."""
+        role_l = f"{agent.get('name', '')} {agent.get('role', '')}".lower()
+        cards = self._select_fact_cards(
+            role_l=role_l,
+            evidence_notes=(graph_brain.get("evidence_cards") or []) + evidence_notes,
+            axis="agent rag adjustment",
+            target=target,
+            pocket_label=pocket_label,
+            limit=3,
+        )
+        clean_target = _clean_name(target)
+        missing_targets = set(graph_brain.get("missing_target_evidence") or [])
+        target_is_thin = bool(clean_target and clean_target in missing_targets)
+        has_numeric_card = any(re.search(r"\d", card) for card in cards)
+        support_points = len(cards) + (1 if has_numeric_card else 0) - (2 if target_is_thin else 0)
+        if support_points >= 4:
+            support_level = "strong"
+            confidence_delta = 0.05
+            directive = "lean on the mapped evidence, but still name the falsifier"
+        elif support_points >= 2:
+            support_level = "moderate"
+            confidence_delta = 0.02
+            directive = "use the evidence as a live input, not as settled truth"
+        else:
+            support_level = "thin"
+            confidence_delta = -0.04
+            directive = "treat the claim as provisional and ask research/data roles for source detail"
+
+        if target_is_thin:
+            directive = (
+                "treat this target as under-evidenced; speak only within your lane and ask for source/date/unit support"
+            )
+
+        return {
+            "support_level": support_level,
+            "confidence_delta": confidence_delta,
+            "directive": directive,
+            "target_is_thin": target_is_thin,
+            "evidence_cards": cards[:3],
+            "warnings": graph_brain.get("warnings", [])[:3],
+        }
+
+    def _rag_adjustment_line(self, rag_adjustment: Dict[str, Any]) -> str:
+        if not rag_adjustment:
+            return "The map does not give me a clean support card here, so I’m treating this as a provisional read."
+        cards = rag_adjustment.get("evidence_cards") or []
+        if cards:
+            evidence = " | ".join(self._short_card(card) for card in cards[:2])
+        else:
+            evidence = "no clean support card for this exact lane"
+        return (
+            f"The map gives this {rag_adjustment.get('support_level', 'thin')} support: {evidence}. "
+            f"So I’ll {rag_adjustment.get('directive', 'keep the claim provisional')}."
+        )
+
     def _agent_argument(
         self,
         agent: Dict[str, Any],
@@ -1767,6 +3031,7 @@ class StructuredSimulationRunner:
         domain_plan: Dict[str, Any],
         evidence_notes: List[str],
         forecast_sample: Dict[str, Any],
+        rag_adjustment: Dict[str, Any] | None = None,
     ) -> str:
         role = str(agent.get("role") or agent.get("name") or "Agent")
         role_l = role.lower()
@@ -1781,34 +3046,205 @@ class StructuredSimulationRunner:
         evidence = self._select_role_evidence(role_l, evidence_notes, target=target, pocket_label=pocket.get("label") or "")
         disagreement = self._disagreement_claim(role_l)
         fact_basis = self._fact_basis(role_l, evidence_notes, disagreement, target=target, pocket_label=pocket.get("label") or "")
-        numeric = (
-            f"My number on `{target}` is base `{base}`, downside `{downside}`, confidence `{confidence}`."
+        claim = self._agent_claim_from_fields(agent, target)
+        signal = self._agent_observable_signal(agent)
+        falsifier = self._agent_falsifier(agent, target)
+        concern = self._clean_agent_field(persona.get("private_concern")) or self._clean_agent_field((agent.get("blind_spots") or [""])[0]) or "the model may be smoothing over a real disagreement"
+        tension = self._clean_agent_field(persona.get("default_tension")) or self._clean_agent_field((agent.get("biases") or [""])[0]) or "one clean story may hide the actual mechanism"
+        stakes_line = self._human_stakes_line(stakes)
+        evidence_status = self._evidence_status_line(evidence_notes, target, agent)
+        character = persona.get("character_name") or agent.get("name")
+        fact_short = self._human_fact_basis(role_l, evidence_notes, disagreement, target=target, pocket_label=pocket.get("label") or "")
+        evidence_short = self._short_card(evidence, max_len=180)
+        pointer = fact_short if fact_short else evidence_short
+        if not pointer:
+            pointer = "I do not have a clean source card for this lane yet"
+        lens = self._role_lens(role_l)
+        numeric_sentence = (
+            f"My number for `{target}` is base `{base}`, downside `{downside}`, confidence `{confidence}`."
             if owns_numbers and base is not None else
-            f"I am not a numeric forecast owner for `{target}`. I contribute `{self._agent_contribution_type(agent)}`: what changes behavior, incentives, trust, attention, or constraints."
-        )
-        opening = persona.get("opening_position") or agent.get("causal_power") or "I am here to test one causal channel."
-        vantage = persona.get("vantage_point") or self._role_lens(role_l)
-        concern = persona.get("private_concern") or "the model is smoothing over a real disagreement"
-        tension = persona.get("default_tension") or "one clean story may hide the actual mechanism"
-        voice = persona.get("voice") or "direct and evidence-focused"
-        skill_line = (
-            f"My reasoning profile is IQ `{cognitive.get('iq_score', 'n/a')}`/{cognitive.get('iq_style', 'n/a')}, "
-            f"EQ `{cognitive.get('eq_score', 'n/a')}`/{cognitive.get('eq_style', 'n/a')}, "
-            f"game-theory `{cognitive.get('game_theory_score', 'n/a')}`/{cognitive.get('game_theory_style', 'n/a')}; "
-            f"risk posture `{cognitive.get('risk_tolerance', 'n/a')}`."
-        )
-        stakes_line = (
-            f"My skin in the game: {stakes.get('skin_in_the_game', 'not specified')}. "
-            f"If wrong, I lose: {stakes.get('what_they_lose_if_wrong', 'credibility or decision quality')}. "
-            f"My strategic posture is `{stakes.get('strategic_posture', 'truth-seeking')}`."
+            f"I am not setting the `{target}` number; I am changing the pressure around behavior, incentives, trust, constraints, or timing."
         )
         return (
-            f"I am speaking as `{persona.get('character_name') or agent.get('name')}`, {voice}, from {vantage}. "
-            f"My stake in this pocket is simple: {opening}. {skill_line} {stakes_line} In `{pocket.get('label')}`, {fact_basis} "
-            f"My evidence lane is {evidence}. {disagreement} {numeric} My private worry is {concern}; the tension I want the room to confront is that "
-            f"{tension}. If the next pocket changes the evidence quality, actor behavior, local participation, "
-            "or scenario math, I will move my number rather than defend my first instinct."
+            f"{character}: My read is simple: {claim}. {lens} "
+            f"The evidence I can use is {pointer}. {evidence_status} "
+            f"What I can personally observe is {signal}. "
+            f"{numeric_sentence} "
+            f"I am pushing back on this: {disagreement} "
+            f"Change my mind with {falsifier}. "
+            f"{stakes_line} My worry is {concern}. The tension I am carrying is {tension}."
         )
+
+    def _human_style_line(self, cognitive: Dict[str, Any]) -> str:
+        fragments = []
+        text = " ".join(str(value).lower() for value in (cognitive or {}).values())
+        if "case" in text or "pattern" in text:
+            fragments.append("I’m comparing this with similar cases, not just the headline.")
+        if "skeptical" in text or "falsifier" in text:
+            fragments.append("I’m looking for the thing that would break the claim.")
+        if "incentive" in text or "principal" in text or "game" in text:
+            fragments.append("I’m watching incentives, not only public statements.")
+        if "ground" in text or "local" in text:
+            fragments.append("I’m giving local or user-level behavior real weight.")
+        if "slow" in text:
+            fragments.append("I won’t move quickly without a mechanism.")
+        elif "fast" in text or "quick" in text:
+            fragments.append("If the evidence changes, I’ll update quickly.")
+        return " ".join(fragments[:2]) or "I’ll stay inside what this role can actually know."
+
+    def _human_stakes_line(self, stakes: Dict[str, Any]) -> str:
+        if not stakes:
+            return "I have a stake here because bad assumptions would distort the whole room."
+        skin = str(stakes.get("skin_in_the_game") or "credibility and decision quality")
+        loss = str(stakes.get("what_they_lose_if_wrong") or "credibility")
+        if skin.lower().startswith("represents or moves part of the simulation outcome through"):
+            skin = "the forecast treating my lane as real, not decorative"
+        if loss.lower().startswith("may misread the wider system outside its information lane"):
+            loss = "overclaiming beyond what my lane can honestly see"
+        return f"My stake is {skin}; if I’m wrong, the cost is {loss}."
+
+    def _clean_agent_field(self, value: Any, max_len: int = 220) -> str:
+        """Return only useful agent/profile text, dropping scaffolding."""
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            return ""
+        lowered = text.lower()
+        weak_patterns = [
+            "represents or moves part of the simulation outcome through",
+            "context-derived knowledge associated with",
+            "make the room account for what",
+            "may overweight its own information access",
+            "may misread the wider system outside its information lane",
+            "update forecasts only when new evidence changes",
+            "role-specific incentives, information gaps",
+            "role specific incentives, information gaps",
+            "brings role-specific exposure",
+            "brings role specific exposure",
+            "causal channel assigned to my role",
+            "whether it changes the forecast",
+            "forecast treating my lane as real",
+            "specialized vantage point created from the prompt",
+            "from the operating lane closest",
+            "stress-test the simulation from this role",
+            "assigned causal channel",
+            "keep the forecast numerically coherent",
+            "turn a messy debate",
+            "expand the evidence frontier",
+            "track which claims become salient",
+            "evidence_strength",
+            "actor_alignment",
+            "uncertainty_pressure",
+        ]
+        if any(pattern in lowered for pattern in weak_patterns):
+            return ""
+        if self._is_meta_instruction_note(text):
+            return ""
+        return self._short_card(text, max_len=max_len)
+
+    def _agent_claim_from_fields(self, agent: Dict[str, Any], target: str) -> str:
+        """Build a claim from actual agent fields without inventing facts."""
+        persona = agent.get("persona") if isinstance(agent.get("persona"), dict) else {}
+        candidates: List[Any] = [
+            persona.get("opening_position"),
+            persona.get("objective"),
+            persona.get("background"),
+            persona.get("vantage_point"),
+            agent.get("causal_power"),
+            agent.get("forecasting_method"),
+            *self._listish(agent.get("heuristics")),
+            *self._listish(agent.get("information_set")),
+            agent.get("institutional_incentives"),
+        ]
+        for candidate in candidates:
+            cleaned = self._clean_agent_field(candidate)
+            if cleaned:
+                return cleaned
+        return (
+            f"No concrete role-specific claim was supplied for `{target}`; "
+            "treat this speaker as a weak pressure lane until better evidence/profile detail is provided."
+        )
+
+    def _agent_observable_signal(self, agent: Dict[str, Any]) -> str:
+        """State what the agent can observe, based only on its profile fields."""
+        candidates: List[str] = []
+        persona = agent.get("persona") if isinstance(agent.get("persona"), dict) else {}
+        for item in self._listish(persona.get("speaks_strongly_about")):
+            cleaned = self._clean_agent_field(item, max_len=140)
+            if cleaned:
+                candidates.append(cleaned)
+        for key in ("trusted_data_sources", "information_set", "ignored_or_underweighted_data"):
+            for item in self._listish(agent.get(key)):
+                cleaned = self._clean_agent_field(item, max_len=180)
+                if cleaned:
+                    candidates.append(cleaned)
+        if candidates:
+            return " / ".join(candidates[:2])
+        return "No concrete observable signal was supplied in this agent profile."
+
+    def _claim_label(self, evidence_notes: List[str], target: str) -> str:
+        """Label evidence quality; do not imply more support than exists."""
+        relevant = [
+            note for note in evidence_notes
+            if target and self._loose_overlap(target, note)
+        ]
+        if any(re.search(r"\d", note or "") for note in relevant):
+            return "evidence-linked model judgment"
+        if relevant:
+            return "prompt/graph-linked model judgment"
+        return "unsupported model judgment"
+
+    def _evidence_status_line(self, evidence_notes: List[str], target: str, agent: Dict[str, Any]) -> str:
+        role_l = f"{agent.get('name', '')} {agent.get('role', '')}".lower()
+        facts = self._select_fact_cards(role_l, evidence_notes, "evidence status", target=target, limit=2)
+        label = self._claim_label(evidence_notes, target)
+        if not facts:
+            return f"Evidence check: `{label}`; I do not have a clean source card for this exact speaker-target lane."
+        cards = " | ".join(self._short_card(fact, max_len=170) for fact in facts[:2])
+        prompt_only = all("using only information available" in (fact or "").lower() for fact in facts[:2])
+        caveat = " This is prompt-derived support, not independent external research." if prompt_only else ""
+        return f"Evidence check: `{label}`. Source cards I am leaning on: {cards}.{caveat}"
+
+    def _listish(self, value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if value in (None, ""):
+            return []
+        return [value]
+
+    def _agent_falsifier(self, agent: Dict[str, Any], target: str) -> str:
+        role_l = f"{agent.get('name', '')} {agent.get('role', '')}".lower()
+        target_label = str(target or "the target")
+        if any(term in role_l for term in ["poll", "data", "quant", "scientist", "research"]):
+            return f"a dated source, denominator, or sensitivity check that moves `{target_label}` outside my current band"
+        if any(term in role_l for term in ["consumer", "household", "voter", "worker", "community", "beneficiary"]):
+            return "proof that affected people are absorbing the shock without changing behavior"
+        if any(term in role_l for term in ["operator", "utility", "grid", "miner", "producer", "supplier", "developer"]):
+            return "a credible operational workaround that changes capacity, timing, or bottleneck severity"
+        if any(term in role_l for term in ["trader", "strategist", "executive", "party", "campaign"]):
+            return "evidence that the payoff structure changed, not just the public narrative"
+        if any(term in role_l for term in ["auditor", "watchdog", "moderator", "mediator"]):
+            return "a cleaner evidence chain that survives challenge from the other side"
+        return f"a concrete mechanism that changes `{target_label}`, not a louder version of the same claim"
+
+    def _short_card(self, value: Any, max_len: int = 180) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        text = re.sub(r"^[A-Za-z ]+::\s*", "", text)
+        if len(text) <= max_len:
+            return text
+        return text[: max_len - 1].rstrip() + "…"
+
+    def _human_fact_basis(
+        self,
+        role_l: str,
+        evidence_notes: List[str],
+        axis: str,
+        target: str = "",
+        pocket_label: str = "",
+    ) -> str:
+        facts = self._select_fact_cards(role_l, evidence_notes, axis, target=target, pocket_label=pocket_label, limit=2)
+        if not facts:
+            return "the prompt is thin for my lane, so this should stay low-confidence"
+        return " / ".join(self._short_card(fact, max_len=150) for fact in facts)
 
     def _role_lens(self, role_l: str) -> str:
         if any(term in role_l for term in ["strategist", "campaign", "party"]):
@@ -1899,9 +3335,12 @@ class StructuredSimulationRunner:
         for target in key_targets[:4]:
             scenario_values = {}
             for scenario, targets in scenario_outputs.items():
-                for point in (targets.get(target) or []):
-                    if point.get("date") == pocket_label:
-                        scenario_values[scenario] = point.get("value")
+                points = targets.get(target) or []
+                selected = next((point for point in points if point.get("date") == pocket_label), None)
+                if selected is None and points:
+                    selected = points[-1]
+                if selected is not None:
+                    scenario_values[scenario] = selected.get("value")
             if scenario_values:
                 ordered = ", ".join(
                     f"{scenario}={value}"

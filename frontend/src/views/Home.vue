@@ -194,6 +194,7 @@
 
             <!-- 启动按钮 -->
             <div class="console-section btn-section">
+              <p v-if="error" class="home-error">{{ error }}</p>
               <button 
                 class="start-engine-btn"
                 @click="startSimulation"
@@ -220,6 +221,8 @@ import { useRouter } from 'vue-router'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 import BrandMark from '../components/BrandMark.vue'
+import { setPendingUpload } from '../store/pendingUpload'
+import { generateOntology } from '../api/graph'
 
 const router = useRouter()
 
@@ -298,20 +301,42 @@ const scrollToBottom = () => {
   })
 }
 
-// 开始模拟 - 立即跳转，API调用在Process页面进行
-const startSimulation = () => {
+// Start the simulation by creating the project immediately.
+// This avoids losing the prompt during page navigation/storage handoff.
+const startSimulation = async () => {
   if (!canSubmit.value || loading.value) return
-  
-  // 存储待上传的数据
-  import('../store/pendingUpload.js').then(({ setPendingUpload }) => {
-    setPendingUpload(files.value, formData.value.simulationRequirement)
-    
-    // 立即跳转到Process页面（使用特殊标识表示新建项目）
+
+  const requirement = formData.value.simulationRequirement.trim()
+  if (!requirement) return
+
+  try {
+    loading.value = true
+    error.value = ''
+    setPendingUpload(files.value, requirement)
+
+    const payload = new FormData()
+    files.value.forEach(file => payload.append('files', file))
+    payload.append('simulation_requirement', requirement)
+    payload.append('include_external_research', 'false')
+
+    const response = await generateOntology(payload)
+    const projectId = response?.data?.project_id
+
+    if (!response?.success || !projectId) {
+      throw new Error(response?.error || 'Project creation failed before Step 1 could start.')
+    }
+
     router.push({
       name: 'Process',
-      params: { projectId: 'new' }
+      params: { projectId }
     })
-  })
+  } catch (err) {
+    const apiPayload = err?.apiError || err?.response?.data
+    error.value = apiPayload?.error || err?.message || 'Failed to start simulation. Please try again.'
+    console.error('Start simulation failed:', err)
+  } finally {
+    loading.value = false
+  }
 }
 </script>
 
@@ -320,7 +345,7 @@ const startSimulation = () => {
 :root {
   --black: #000000;
   --white: #FFFFFF;
-  --orange: #FF4500;
+  --orange: var(--hx-accent);
   --gray-light: #F5F5F5;
   --gray-text: #666666;
   --border: #E5E5E5;
@@ -329,7 +354,7 @@ const startSimulation = () => {
     确保已在 index.html 引入这些 Google Fonts 
   */
   --font-mono: 'JetBrains Mono', monospace;
-  --font-sans: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
+  --font-sans: var(--hx-font-body);
   --font-cn: 'Noto Sans SC', system-ui, sans-serif;
 }
 
@@ -343,8 +368,8 @@ const startSimulation = () => {
 /* 顶部导航 */
 .navbar {
   height: 60px;
-  background: var(--black);
-  color: var(--white);
+  background: var(--hx-panel-strong);
+  color: var(--hx-ink);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -365,7 +390,7 @@ const startSimulation = () => {
 }
 
 .github-link {
-  color: var(--white);
+  color: var(--hx-ink);
   text-decoration: none;
   font-family: var(--font-mono);
   font-size: 0.9rem;
@@ -524,12 +549,11 @@ const startSimulation = () => {
 .hero-logo {
   width: min(100%, 520px);
   min-height: 220px;
-  border: 2px solid var(--black);
+  border: 3px double var(--hx-line-strong);
   background:
-    linear-gradient(135deg, rgba(255, 98, 68, 0.12), transparent 48%),
-    radial-gradient(circle at 82% 18%, rgba(255, 98, 68, 0.22), transparent 28%),
-    var(--white);
-  box-shadow: 12px 12px 0 var(--black);
+    linear-gradient(135deg, rgba(127, 29, 29, 0.08), transparent 48%),
+    var(--hx-panel-strong);
+  box-shadow: 8px 8px 0 rgba(42, 32, 21, 0.18);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -706,7 +730,7 @@ const startSimulation = () => {
 }
 
 .console-box {
-  border: 1px solid #CCC; /* 外部实线 */
+  border: 3px double var(--hx-line-strong);
   padding: 8px; /* 内边距形成双重边框感 */
 }
 
@@ -716,6 +740,17 @@ const startSimulation = () => {
 
 .console-section.btn-section {
   padding-top: 0;
+}
+
+.home-error {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(190, 66, 32, 0.25);
+  border-radius: 14px;
+  background: rgba(255, 98, 68, 0.09);
+  color: #7a2e1d;
+  font-size: 0.86rem;
+  line-height: 1.45;
 }
 
 .console-header {
@@ -728,7 +763,7 @@ const startSimulation = () => {
 }
 
 .upload-zone {
-  border: 1px dashed #CCC;
+  border: 1px dashed var(--hx-line-strong);
   height: 200px;
   overflow-y: auto;
   display: flex;
@@ -736,7 +771,7 @@ const startSimulation = () => {
   justify-content: center;
   cursor: pointer;
   transition: all 0.3s;
-  background: #FAFAFA;
+  background: rgba(255,250,240,0.66);
 }
 
 .upload-zone.has-files {
@@ -830,8 +865,8 @@ const startSimulation = () => {
 
 .input-wrapper {
   position: relative;
-  border: 1px solid #DDD;
-  background: #FAFAFA;
+  border: 1px solid var(--hx-line-strong);
+  background: rgba(255,250,240,0.7);
 }
 
 .code-input {
@@ -858,8 +893,8 @@ const startSimulation = () => {
 
 .start-engine-btn {
   width: 100%;
-  background: var(--black);
-  color: var(--white);
+  background: var(--hx-ink);
+  color: var(--hx-bg-soft);
   border: none;
   padding: 20px;
   font-family: var(--font-mono);
@@ -883,8 +918,8 @@ const startSimulation = () => {
 }
 
 .start-engine-btn:hover:not(:disabled) {
-  background: var(--orange);
-  border-color: var(--orange);
+  background: var(--hx-accent);
+  border-color: var(--hx-accent);
   transform: translateY(-2px);
 }
 

@@ -38,9 +38,10 @@ def main():
     host = os.environ.get('FLASK_HOST', '0.0.0.0')
     port = int(os.environ.get('PORT') or os.environ.get('FLASK_PORT', 5001))
     debug = Config.DEBUG
+    use_reloader = os.environ.get('FLASK_USE_RELOADER', 'False').lower() == 'true'
     
     # Start server.
-    app.run(host=host, port=port, debug=debug, threaded=True)
+    app.run(host=host, port=port, debug=debug, threaded=True, use_reloader=use_reloader)
 
 
 if __name__ == '__main__':

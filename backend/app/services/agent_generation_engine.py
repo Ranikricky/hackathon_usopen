@@ -9,6 +9,7 @@ rules. It deliberately returns schema-first data instead of prose personas.
 import uuid
 from typing import Any, Dict, List, Optional
 
+from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from ..models.simulation_state import SimulationStateManager
@@ -33,7 +34,6 @@ _NON_NUMERIC_ROLE_HINTS = (
     "student",
     "citizen",
     "resident",
-    "observer",
     "booth",
     "field",
     "strategist",
@@ -64,10 +64,10 @@ _NUMERIC_ROLE_HINTS = (
 
 def _infer_numeric_ownership(name: str, role: str) -> bool:
     text = f"{name} {role}".lower()
-    if any(hint in text for hint in _NON_NUMERIC_ROLE_HINTS):
-        return False
     if any(hint in text for hint in _NUMERIC_ROLE_HINTS):
         return True
+    if any(hint in text for hint in _NON_NUMERIC_ROLE_HINTS):
+        return False
     return True
 
 
@@ -91,7 +91,7 @@ class AgentGenerationEngine:
 
         try:
             if self.llm_client is None:
-                self.llm_client = LLMClient()
+                self.llm_client = LLMClient(timeout=Config.AGENT_LLM_TIMEOUT_SECONDS)
             agents = self._generate_with_llm(domain_plan, evidence_summary)
             return self._normalize_agents(agents, domain_plan)
         except Exception as exc:
@@ -127,6 +127,11 @@ Return JSON with this shape:
       "heuristics": ["..."],
       "biases": ["..."],
       "blind_spots": ["..."],
+      "allowed_claims": ["..."],
+      "forbidden_claims": ["..."],
+      "evidence_scope": ["..."],
+      "must_not_know": ["..."],
+      "ground_truth_mode": "direct_lived_experience | expert_model | institutional_signal | source_audit | synthetic_process_control",
       "memory": {{
         "prior_beliefs": [],
         "past_revisions": [],
@@ -179,6 +184,9 @@ The agents must answer:
 - Who has high analytical skill, social/emotional reading, local knowledge, numeracy, or game-theory skill?
 - Who can detect bluffing, coalition pressure, strategic silence, credible threats, coordination failures, or principal-agent problems?
 - What does each agent personally or institutionally gain or lose from being right or wrong?
+- What is each agent allowed to claim from its own information lane?
+- What must each agent refuse to claim without evidence?
+- What information must remain unknown because of cutoff, role, or ground-truth limits?
 
 Simulation plan:
 {domain_plan}
@@ -250,6 +258,14 @@ evidence summary. They must not come from hidden templates.
                 "heuristics": self._list(agent.get("heuristics")),
                 "biases": self._list(agent.get("biases")),
                 "blind_spots": self._list(agent.get("blind_spots")),
+                "allowed_claims": self._list(agent.get("allowed_claims")) or self._default_allowed_claims(name, agent),
+                "forbidden_claims": self._list(agent.get("forbidden_claims")) or self._default_forbidden_claims(name, agent),
+                "evidence_scope": self._list(agent.get("evidence_scope")) or self._default_evidence_scope(name, agent),
+                "must_not_know": self._list(agent.get("must_not_know")) or [
+                    "Post-cutoff outcomes or actual future results unless explicitly provided by the user as allowed evidence.",
+                    "Private information outside this role's information lane.",
+                ],
+                "ground_truth_mode": str(agent.get("ground_truth_mode") or self._infer_ground_truth_mode(name, str(agent.get("role") or name))),
                 "memory": {
                     "prior_beliefs": self._list((agent.get("memory") or {}).get("prior_beliefs")),
                     "past_revisions": self._list((agent.get("memory") or {}).get("past_revisions")),
@@ -277,6 +293,41 @@ evidence summary. They must not come from hidden templates.
             )
             return fallback
         return normalized or fallback
+
+    def _infer_ground_truth_mode(self, name: str, role: str) -> str:
+        text = f"{name} {role}".lower()
+        if any(term in text for term in ["voter", "consumer", "worker", "household", "patient", "student", "beneficiary", "community"]):
+            return "direct_lived_experience"
+        if any(term in text for term in ["pollster", "quant", "scientist", "economist", "analyst", "research"]):
+            return "expert_model"
+        if any(term in text for term in ["auditor", "watchdog", "data retrieval"]):
+            return "source_audit"
+        if any(term in text for term in ["moderator", "mediator", "synthesizer"]):
+            return "synthetic_process_control"
+        return "institutional_signal"
+
+    def _default_allowed_claims(self, name: str, agent: Dict[str, Any]) -> List[str]:
+        return [
+            f"{name} may make claims grounded in its role, evidence scope, incentives, and stated information set.",
+            "May describe uncertainty, local observations, incentives, and conditional assumptions.",
+        ]
+
+    def _default_forbidden_claims(self, name: str, agent: Dict[str, Any]) -> List[str]:
+        return [
+            "Must not claim private facts, future actuals, hidden polling, proprietary data, or exact outcomes unless present in approved evidence.",
+            "Must not convert personal/lived experience into a full numeric forecast unless assigned numeric capability.",
+        ]
+
+    def _default_evidence_scope(self, name: str, agent: Dict[str, Any]) -> List[str]:
+        scope = self._list(agent.get("trusted_data_sources"))
+        if scope:
+            return scope
+        return [
+            "approved_domain_contract",
+            "graph_evidence",
+            "approved_external_research",
+            "role_specific_lived_or_institutional_context",
+        ]
 
     def _normalize_cognitive_profile(self, value: Dict[str, Any], name: str, idx: int) -> Dict[str, Any]:
         def score(key: str, fallback: int) -> int:

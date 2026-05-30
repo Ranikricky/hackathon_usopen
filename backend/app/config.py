@@ -31,6 +31,10 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    LLM_TIMEOUT_SECONDS = float(os.environ.get('LLM_TIMEOUT_SECONDS', '35'))
+    PLANNER_LLM_TIMEOUT_SECONDS = float(os.environ.get('PLANNER_LLM_TIMEOUT_SECONDS', '18'))
+    ONTOLOGY_LLM_TIMEOUT_SECONDS = float(os.environ.get('ONTOLOGY_LLM_TIMEOUT_SECONDS', '18'))
+    AGENT_LLM_TIMEOUT_SECONDS = float(os.environ.get('AGENT_LLM_TIMEOUT_SECONDS', '12'))
     
     # Zep.
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')

@@ -108,6 +108,29 @@ def _evaluate_report_readiness(state, graph_id: str) -> dict:
     }
 
 
+def _semantic_blocking_reasons(validation: dict) -> list[str]:
+    """Map validator errors into product-facing report blockers."""
+    reasons = []
+    text_errors = [str(item) for item in (validation or {}).get("errors", [])]
+    checks = [
+        ("domain mismatch", "domain_mismatch"),
+        ("target extraction leaked", "invalid_targets"),
+        ("placeholder target", "invalid_targets"),
+        ("wrong time-pocket", "wrong_time_pockets"),
+        ("agent roster is too generic", "generic_agents"),
+        ("instruction leakage", "instruction_leakage"),
+        ("weak debate quality", "weak_debate_quality"),
+        ("no mediated revision", "missing_forecast_revisions"),
+        ("report-template mismatch", "report_template_mismatch"),
+        ("forecast ledger", "missing_forecast_ledger"),
+    ]
+    lowered_errors = "\n".join(text_errors).lower()
+    for needle, reason in checks:
+        if needle in lowered_errors and reason not in reasons:
+            reasons.append(reason)
+    return reasons
+
+
 # ============== 报告生成接口 ==============
 
 @report_bp.route('/generate', methods=['POST'])
@@ -229,6 +252,7 @@ def generate_report():
                 return jsonify({
                     "success": False,
                     "error": "Simulation evidence insufficient",
+                    "blocking_reasons": _semantic_blocking_reasons(validation),
                     "diagnostic": validator.diagnostic_message(validation),
                     "next_steps": [
                         "Run the structured simulation until required agents emit numeric forecast paths.",

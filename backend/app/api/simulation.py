@@ -5,6 +5,7 @@ Step2: Zep实体读取与过滤、OASIS模拟准备与运行（全程自动化�
 
 import json
 import os
+import re
 import traceback
 import uuid
 from flask import Response, request, jsonify, send_file
@@ -20,6 +21,11 @@ from ..services.agent_generation_engine import AgentGenerationEngine
 from ..services.external_research import ExternalResearchService
 from ..services.numeric_validation import NumericValidationService
 from ..services.structured_simulation_runner import StructuredSimulationRunner
+from ..services.domain_contract import (
+    SOCIAL_DISCOURSE_ENGINE,
+    build_domain_contract,
+    domain_plan_from_contract,
+)
 from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
 from ..models.project import ProjectManager
@@ -31,6 +37,225 @@ logger = get_logger('horizonxl.api.simulation')
 # Interview prompt 优化前缀
 # 添加此前缀可以避免Agent调用工具，直接用文本回复
 INTERVIEW_PROMPT_PREFIX = "结合你的人设、所有的过往记忆与行动，不调用任何工具直接用文本回复我："
+
+
+def _humanize_transcript_label(value: str) -> str:
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(value or ""))
+    text = text.replace("_", " ").replace("-", " ")
+    return re.sub(r"\s+", " ", text).strip().title()
+
+
+def _short_transcript_text(value: str, limit: int = 360) -> str:
+    text = " ".join(str(value or "").split())
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _sentence_pick(message: str, includes=None, excludes=None, limit: int = 2) -> list[str]:
+    includes = [item.lower() for item in (includes or [])]
+    excludes = [item.lower() for item in (excludes or [])]
+    sentences = re.split(r"(?<=[.!?])\s+", " ".join(str(message or "").split()))
+    picked = []
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if includes and not any(item in lowered for item in includes):
+            continue
+        if excludes and any(item in lowered for item in excludes):
+            continue
+        if len(sentence) < 20:
+            continue
+        picked.append(_short_transcript_text(sentence, 220))
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _extract_after(message: str, marker: str, stop_markers=None, limit: int = 260) -> str:
+    text = " ".join(str(message or "").split())
+    idx = text.lower().find(marker.lower())
+    if idx < 0:
+        return ""
+    extracted = text[idx + len(marker):].strip()
+    for stop in stop_markers or []:
+        stop_idx = extracted.lower().find(stop.lower())
+        if stop_idx > 0:
+            extracted = extracted[:stop_idx].strip()
+    return _short_transcript_text(extracted, limit)
+
+
+def _clean_evidence_lane(text: str) -> str:
+    cleaned = _short_transcript_text(text, 260)
+    lowered = cleaned.lower()
+    if (
+        "using only information available" in lowered
+        and "simulate the next" in lowered
+        and ("graph numeric fact" in lowered or "prompt numeric anchor" in lowered or len(cleaned) > 180)
+    ):
+        return "Prompt-only evidence was attached for this lane; no independent source packet was available in the saved state."
+    return cleaned
+
+
+def _strip_transcript_jargon(text: str) -> str:
+    """Remove internal scoring labels from human transcript rendering."""
+    cleaned = str(text or "")
+    cleaned = re.sub(r";\s*posture=[^;)]+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r";\s*graph support=[^;)]+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bposture=[^\s;)]+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bgraph support=[^\s;)]+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:risk-warning|opportunistic|defensive|offensive|neutral-cautious)\b", "cautious", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _clean_transcript_message(turn: dict) -> str:
+    """Render a stored turn as something a human can read.
+
+    Old states may contain verbose templated turns. This function keeps the
+    substance while stripping scaffolding like "I'm coming in..." and repeated
+    map/provenance boilerplate.
+    """
+    turn_type = turn.get("turn_type") or "dialogue"
+    speaker = turn.get("speaker_name") or turn.get("speaker_id") or ""
+    message = _strip_transcript_jargon(" ".join(str(turn.get("message") or "").split()))
+    metadata = turn.get("metadata") or {}
+    if not message:
+        return "_No message recorded._"
+
+    if turn_type == "agent_argument":
+        position = _extract_after(
+            message,
+            "I am saying this:",
+            stop_markers=[". My evidence is", ". Evidence status:", ". What I can"],
+            limit=260,
+        ) or _extract_after(
+            message,
+            "but my point is practical:",
+            stop_markers=[". I’m comparing", ". I'm comparing", ". My stake", ". The map", ". In `", ". In "],
+            limit=240,
+        )
+        if not position:
+            position = _extract_after(message, "my read is:", stop_markers=[". I’m", ". I'm", ". The evidence"], limit=240)
+        if (
+            not position
+            or "make the room account" in position.lower()
+            or "keep the forecast numerically coherent" in position.lower()
+            or "turn a messy debate" in position.lower()
+            or "expand the evidence frontier" in position.lower()
+            or "track which claims become salient" in position.lower()
+        ):
+            position = ""
+        evidence = _extract_after(
+            message,
+            "My evidence is",
+            stop_markers=[". Evidence status:", ". What I can", ". On `", ". I am not"],
+            limit=260,
+        ) or _extract_after(
+            message,
+            "the fact I’m leaning on is:",
+            stop_markers=[" My evidence lane is:", " My pushback is:", " I disagree"],
+            limit=260,
+        ) or _extract_after(
+            message,
+            "The evidence I can actually use is:",
+            stop_markers=[" The map", " My number", " I am not"],
+            limit=260,
+        )
+        if evidence:
+            evidence = _clean_evidence_lane(evidence)
+        number = _sentence_pick(
+            message,
+            includes=["my number on", "not a numeric forecast owner", "i am at base", "i am not setting"],
+            excludes=["i’m coming in"],
+            limit=1,
+        )
+        worry = _extract_after(
+            message,
+            "My worry is",
+            stop_markers=["; the tension", ". The tension", ". Change my mind"],
+            limit=220,
+        ) or _extract_after(
+            message,
+            "What worries me is",
+            stop_markers=[". The room should", ". If the next pocket", ". The hidden tension"],
+            limit=220,
+        ) or _extract_after(message, "What still worries me is", stop_markers=["; the hidden tension"], limit=220)
+        falsifier = _extract_after(
+            message,
+            "Change my mind with",
+            stop_markers=[". My stake", ". My worry"],
+            limit=220,
+        ) or _extract_after(message, "What would change my mind:", stop_markers=[". What still"], limit=220)
+        bullets = []
+        if position:
+            bullets.append(f"- Claim: {position}")
+        if evidence:
+            bullets.append(f"- Evidence lane: {evidence}")
+        if number:
+            bullets.append(f"- Numeric stance: {number[0]}")
+        if worry:
+            bullets.append(f"- Concern: {worry}")
+        if falsifier:
+            bullets.append(f"- What would change this view: {falsifier}")
+        if not bullets:
+            return (
+                "_This saved turn contained only boilerplate role framing, not a concrete claim. "
+                "Use the raw JSON transcript if you need to audit the original text._"
+            )
+        if not position:
+            bullets.insert(
+                0,
+                "- Concrete claim: not recorded in this saved turn after removing boilerplate role framing."
+            )
+        return "\n".join(bullets)
+
+    if turn_type in {"challenge", "rebuttal"}:
+        first = _sentence_pick(
+            message,
+            excludes=[
+                "brings role-specific",
+                "the part i know best",
+                "the part i am attacking",
+                "i may be wrong where",
+                "fact basis:",
+                "my evidence lane is:",
+                "opportunistic",
+                "risk-warning",
+            ],
+            limit=3,
+        )
+        return " ".join(first) if first else _short_transcript_text(message, 420)
+
+    if turn_type == "graph_intervention":
+        actor_count = metadata.get("actor_count", "")
+        target_count = metadata.get("target_count", "")
+        numeric_count = metadata.get("numeric_fact_count", "")
+        missing = metadata.get("missing_target_evidence") or []
+        lines = [
+            f"- Signal map check: {actor_count} actor nodes, {target_count} targets, {numeric_count} numeric facts.",
+            "- Role in debate: keep speakers tied to target variables and evidence cards; do not let graph weakness block the run.",
+        ]
+        if missing:
+            lines.append(f"- Thin evidence targets: {', '.join(missing[:6])}.")
+        return "\n".join(lines)
+
+    if turn_type == "evidence_injection":
+        return _clean_evidence_lane(message.replace("Source packet for this pocket:", "Evidence packet:"))
+
+    if turn_type == "data_extraction":
+        return _clean_evidence_lane(message)
+
+    if turn_type in {"moderator_cross_question", "moderator_evaluation"}:
+        return " ".join(_sentence_pick(message, limit=3)) or _short_transcript_text(message, 420)
+
+    if turn_type in {"research_check", "evidence_audit"}:
+        return " ".join(_sentence_pick(message, limit=3)) or _short_transcript_text(message, 460)
+
+    if turn_type in {"quant_check", "numeric_synthesis", "mediated_revision", "challenge_summary"}:
+        return " ".join(_sentence_pick(message, limit=3)) or _short_transcript_text(message, 460)
+
+    return _short_transcript_text(message, 460)
 
 
 def _render_discussion_transcript_markdown(state_dict: dict) -> str:
@@ -55,7 +280,7 @@ def _render_discussion_transcript_markdown(state_dict: dict) -> str:
         f"- Turns: `{len(turns)}`",
         f"- Time pockets: `{len(pockets)}`",
         "",
-        "This transcript is rendered from `structured_state.json`. It shows the moderator, research/data turns, agent arguments, challenges, rebuttals, mediated revisions, evidence audit, and quant synthesis.",
+        "Rendered from `structured_state.json`. This is the room transcript: moderator framing, graph/RAG checks, evidence injections, agent claims, challenges, rebuttals, quant checks, and mediated revisions.",
         "",
     ]
 
@@ -69,22 +294,18 @@ def _render_discussion_transcript_markdown(state_dict: dict) -> str:
             continue
         for idx, turn in enumerate(pocket_turns, start=1):
             speaker = turn.get("speaker_name") or turn.get("speaker_id") or "Unknown speaker"
-            role = turn.get("speaker_role") or turn.get("turn_type") or "turn"
             turn_type = turn.get("turn_type") or "dialogue"
-            message = " ".join(str(turn.get("message") or "").split())
+            message = _clean_transcript_message(turn)
             metadata = turn.get("metadata") or {}
             lines.extend([
-                f"### {idx}. {speaker}",
-                "",
-                f"- Type: `{turn_type}`",
-                f"- Role: `{role}`",
+                f"### {idx}. {speaker} · `{_humanize_transcript_label(turn_type)}`",
                 "",
                 message or "_No message recorded._",
                 "",
             ])
             if turn_type == "mediated_revision" and metadata:
                 lines.extend([
-                    "**Revision metadata**",
+                    "**Mediator ledger**",
                     "",
                     f"- Target: `{metadata.get('contested_target', '')}`",
                     f"- Original: `{metadata.get('original_base', '')}`",
@@ -240,6 +461,7 @@ def plan_simulation():
         data = request.get_json() or {}
         project_id = data.get('project_id')
         prompt = (data.get('prompt') or '').strip()
+        persist = bool(data.get("persist") or data.get("create_project") or project_id)
 
         project = None
         document_text = ''
@@ -258,6 +480,15 @@ def plan_simulation():
                 "success": False,
                 "error": "A prompt or project simulation requirement is required."
             }), 400
+
+        if not project and data.get("create_project"):
+            project = ProjectManager.create_project(name=data.get("project_name") or "Horizon XL Simulation")
+            project_id = project.project_id
+            project.simulation_requirement = prompt
+            project.generation_seed = f"{project.project_id}:{uuid.uuid4().hex[:12]}"
+            ProjectManager.save_extracted_text(project.project_id, prompt)
+            project.files.append({"filename": "prompt_input.txt", "size": len(prompt)})
+            ProjectManager.save_project(project)
 
         research_packet = None
         if data.get("include_external_research", True) is not False:
@@ -289,10 +520,29 @@ def plan_simulation():
             (project.generation_seed if project else None)
             or f"{project_id or 'prompt'}:{uuid.uuid4().hex[:12]}"
         )
+        contract = build_domain_contract(
+            plan,
+            prompt,
+            project_id=project_id,
+            approved=bool(data.get("approved", False)),
+            overrides=data.get("domain_contract_overrides") if isinstance(data.get("domain_contract_overrides"), dict) else None,
+        )
+        plan["domain_contract"] = {
+            "engine_mode": contract.get("engine_mode"),
+            "report_template": contract.get("report_template"),
+            "approved": bool(contract.get("approved")),
+        }
+
+        if persist and project:
+            ProjectManager.save_domain_contract(project.project_id, contract)
 
         return jsonify({
             "success": True,
-            "data": plan,
+            "data": {
+                **plan,
+                "project_id": project_id,
+                "domain_contract": contract,
+            },
             "external_research": {
                 "enabled": bool(research_packet and research_packet.get("enabled")),
                 "source_count": len(research_packet.get("sources", [])) if isinstance(research_packet, dict) else 0,
@@ -314,8 +564,11 @@ def generate_structured_agents():
     try:
         data = request.get_json() or {}
         domain_plan = data.get('domain_plan') or {}
+        project_id = data.get("project_id")
+        contract = ProjectManager.get_domain_contract(project_id) if project_id else None
+        if contract:
+            domain_plan = domain_plan_from_contract(contract, domain_plan)
         if not domain_plan:
-            project_id = data.get('project_id')
             prompt = data.get('prompt')
             if not prompt and project_id:
                 project = ProjectManager.get_project(project_id)
@@ -483,8 +736,11 @@ def run_structured_simulation():
             prompt = prompt or project.simulation_requirement or ''
             graph_id = graph_id or project.graph_id
             document_text = document_text or ProjectManager.get_extracted_text(project_id) or ''
+            contract = ProjectManager.get_domain_contract(project_id)
+        else:
+            contract = None
 
-        if not prompt and not data.get('domain_plan'):
+        if not prompt and not data.get('domain_plan') and not contract:
             return jsonify({
                 "success": False,
                 "error": "prompt or domain_plan is required."
@@ -498,37 +754,53 @@ def run_structured_simulation():
                 "error": t('api.simulationNotFound', id=simulation_id)
             }), 404
 
+        run_project_id = project_id
+        run_graph_id = graph_id
         if not legacy_state:
-            if not project_id:
-                return jsonify({
-                    "success": False,
-                    "error": "project_id is required when creating a structured simulation."
-                }), 400
-            if not graph_id:
-                return jsonify({
-                    "success": False,
-                    "error": t('api.graphNotBuilt')
-                }), 400
-            legacy_state = manager.create_simulation(
-                project_id=project_id,
-                graph_id=graph_id,
-                enable_twitter=False,
-                enable_reddit=False,
-            )
-            simulation_id = legacy_state.simulation_id
+            if project_id and graph_id:
+                legacy_state = manager.create_simulation(
+                    project_id=project_id,
+                    graph_id=graph_id,
+                    enable_twitter=False,
+                    enable_reddit=False,
+                )
+                simulation_id = legacy_state.simulation_id
+                run_project_id = legacy_state.project_id
+                run_graph_id = legacy_state.graph_id
+            else:
+                # The structured engine is allowed to run from a prompt/plan
+                # without the legacy OASIS project shell. This keeps newer
+                # prompt-only workflows from failing before simulation starts.
+                simulation_id = simulation_id or f"sim_{uuid.uuid4().hex[:12]}"
+                run_project_id = project_id or f"adhoc_{uuid.uuid4().hex[:12]}"
+                graph_context_payload = data.get("graph_context") or {}
+                run_graph_id = graph_id or graph_context_payload.get("graph_id") or "structured_ad_hoc"
+        else:
+            run_project_id = legacy_state.project_id
+            run_graph_id = legacy_state.graph_id
 
-        domain_plan = data.get('domain_plan') or DomainSimulationPlanner().plan(
+        domain_plan = domain_plan_from_contract(contract, data.get('domain_plan')) if contract else (data.get('domain_plan') or DomainSimulationPlanner().plan(
             user_question=prompt or (project.simulation_requirement if project else ''),
             document_text=document_text,
-            project_id=legacy_state.project_id,
-        )
+            project_id=run_project_id,
+        ))
         domain_plan["generation_seed"] = (
             data.get("generation_seed")
             or domain_plan.get("generation_seed")
-            or f"{legacy_state.project_id}:{simulation_id}:{uuid.uuid4().hex[:8]}"
+            or f"{run_project_id}:{simulation_id}:{uuid.uuid4().hex[:8]}"
         )
 
-        evidence_text = data.get("evidence_text") or document_text or prompt
+        contract_evidence = "\n".join(
+            item.get("text", "")
+            for item in ((contract or {}).get("evidence") or [])
+            if isinstance(item, dict)
+        )
+        evidence_text = data.get("evidence_text") or "\n".join(
+            part for part in [contract_evidence, document_text, prompt] if part
+        )
+        graph_context = data.get("graph_context")
+        if not graph_context and project_id:
+            graph_context = ProjectManager.get_local_graph(project_id) or {}
         agents = data.get('agents') or AgentGenerationEngine().generate_agents(
             domain_plan,
             evidence_summary=evidence_text[:12000],
@@ -537,10 +809,11 @@ def run_structured_simulation():
 
         structured_state = StructuredSimulationRunner().run(
             simulation_id=simulation_id,
-            project_id=legacy_state.project_id,
+            project_id=run_project_id,
             domain_plan=domain_plan,
             agents=agents,
             evidence_text=evidence_text,
+            graph_context=graph_context or {},
         )
 
         validation = structured_state.validation or NumericValidationService().validate(structured_state.to_dict())
@@ -548,8 +821,8 @@ def run_structured_simulation():
             "success": True,
             "data": {
                 "simulation_id": simulation_id,
-                "project_id": legacy_state.project_id,
-                "graph_id": legacy_state.graph_id,
+                "project_id": run_project_id,
+                "graph_id": run_graph_id,
                 "domain": domain_plan.get("domain"),
                 "agent_count": len(structured_state.agents),
                 "time_pocket_count": len(structured_state.time_pockets),
@@ -620,45 +893,28 @@ def create_simulation():
                 "error": t('api.graphNotBuilt')
             }), 400
         
+        contract = ProjectManager.get_domain_contract(project_id) or {}
+        engine_mode = contract.get("engine_mode") or "structured_simulation"
+        use_social_discourse = engine_mode == SOCIAL_DISCOURSE_ENGINE
+
         manager = SimulationManager()
         state = manager.create_simulation(
             project_id=project_id,
             graph_id=graph_id,
-            enable_twitter=data.get('enable_twitter', True),
-            enable_reddit=data.get('enable_reddit', True),
+            enable_twitter=data.get('enable_twitter', use_social_discourse),
+            enable_reddit=data.get('enable_reddit', use_social_discourse),
         )
 
-        simulation_requirement = project.simulation_requirement or data.get('prompt') or ''
-        structured_state = None
-        if simulation_requirement:
-            document_text = ProjectManager.get_extracted_text(project_id) or ''
-            domain_plan = DomainSimulationPlanner().plan(
-                user_question=simulation_requirement,
-                document_text=document_text,
-                project_id=project_id,
-            )
-            domain_plan["generation_seed"] = f"{project.generation_seed or project_id}:{state.simulation_id}"
-            structured_state = SimulationStateManager.initialize(
-                simulation_id=state.simulation_id,
-                project_id=project_id,
-                domain_plan=domain_plan,
-                agents=AgentGenerationEngine().generate_agents(
-                    domain_plan,
-                    document_text[:8000],
-                    use_llm=data.get("use_llm_agents", True) is not False,
-                ),
-            )
-        
         response_data = state.to_dict()
-        if structured_state:
-            response_data["structured_state"] = {
-                "simulation_id": structured_state.simulation_id,
-                "domain": structured_state.domain_plan.get("domain"),
-                "target_variables": structured_state.domain_plan.get("target_variables", []),
-                "agents": len(structured_state.agents),
-                "time_pockets": len(structured_state.time_pockets),
-                "state_path": "structured_state.json",
-            }
+        response_data["structured_state"] = {
+            "status": "not_started",
+            "engine_mode": engine_mode,
+            "message": (
+                "Simulation shell created. Structured debate is the default engine."
+                if not use_social_discourse else
+                "Simulation shell created. Legacy social discourse engine selected by Domain Contract."
+            ),
+        }
 
         return jsonify({
             "success": True,
@@ -1972,6 +2228,59 @@ def start_simulation():
                 "error": t('api.simulationNotFound', id=simulation_id)
             }), 404
 
+        project = ProjectManager.get_project(state.project_id)
+        contract = ProjectManager.get_domain_contract(state.project_id) if project else None
+        engine_mode = (contract or {}).get("engine_mode") or "structured_simulation"
+        if engine_mode != SOCIAL_DISCOURSE_ENGINE:
+            prompt = project.simulation_requirement if project else ""
+            document_text = ProjectManager.get_extracted_text(state.project_id) or ""
+            graph_context = ProjectManager.get_local_graph(state.project_id) or {}
+            domain_plan = domain_plan_from_contract(contract) or DomainSimulationPlanner().plan(
+                user_question=prompt,
+                document_text=document_text,
+                project_id=state.project_id,
+            )
+            evidence_text = "\n".join(
+                part for part in [
+                    "\n".join(
+                        item.get("text", "")
+                        for item in ((contract or {}).get("evidence") or [])
+                        if isinstance(item, dict)
+                    ),
+                    document_text,
+                    prompt,
+                ] if part
+            )
+            agents = AgentGenerationEngine().generate_agents(
+                domain_plan,
+                evidence_summary=evidence_text[:12000],
+                use_llm=data.get("use_llm_agents", True) is not False,
+            )
+            structured_state = StructuredSimulationRunner().run(
+                simulation_id=simulation_id,
+                project_id=state.project_id,
+                domain_plan=domain_plan,
+                agents=agents,
+                evidence_text=evidence_text,
+                graph_context=graph_context,
+            )
+            state.status = SimulationStatus.COMPLETED
+            manager._save_simulation_state(state)
+            return jsonify({
+                "success": True,
+                "data": {
+                    "simulation_id": simulation_id,
+                    "runner_status": "completed",
+                    "engine_mode": engine_mode,
+                    "structured": True,
+                    "current_round": len(structured_state.time_pockets),
+                    "total_rounds": len(structured_state.time_pockets),
+                    "progress_percent": 100,
+                    "agent_output_count": len(structured_state.agent_outputs),
+                    "validation": structured_state.validation,
+                }
+            })
+
         force_restarted = False
         
         # 智能处理状态：如果准备工作已完成，允许重新启动
@@ -2206,6 +2515,9 @@ def get_run_status_detail(simulation_id: str):
     
     Query参数：
         platform: 过滤平台（twitter/reddit，可选）
+        include_all: 是否返回所有动作（默认 false）
+        action_limit: 返回所有动作的上限（默认 200）
+        recent_limit: 返回当前轮次最近动作的上限（默认 120）
     
     返回：
         {
@@ -2237,6 +2549,11 @@ def get_run_status_detail(simulation_id: str):
     try:
         run_state = SimulationRunner.get_run_state(simulation_id)
         platform_filter = request.args.get('platform')
+        include_all = str(request.args.get('include_all', 'false')).lower() in ('1', 'true', 'yes', 'y', 'on')
+        action_limit = request.args.get('action_limit', 200, type=int)
+        recent_limit = request.args.get('recent_limit', 120, type=int)
+        action_limit = action_limit if action_limit and action_limit > 0 else 200
+        recent_limit = recent_limit if recent_limit and recent_limit > 0 else 120
         
         if not run_state:
             return jsonify({
@@ -2244,36 +2561,63 @@ def get_run_status_detail(simulation_id: str):
                 "data": {
                     "simulation_id": simulation_id,
                     "runner_status": "idle",
+                    "recent_actions": [],
                     "all_actions": [],
                     "twitter_actions": [],
                     "reddit_actions": []
                 }
             })
         
-        # 获取完整的动作列表
-        all_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform=platform_filter
-        )
+        # 默认只返回内存中的最近动作，避免每个轮询返回全量日志导致前端性能问题
+        detail_state = run_state.to_detail_dict()
+        recent_actions = detail_state.get("recent_actions", [])
+        if recent_limit and isinstance(recent_limit, int) and recent_limit > 0:
+            recent_actions = recent_actions[:recent_limit]
+
+        # 按平台过滤最近动作（当请求显式指定平台时）
+        if platform_filter and recent_actions:
+            if isinstance(recent_actions[0], dict):
+                recent_actions = [a for a in recent_actions if a.get("platform") == platform_filter]
+            else:
+                recent_actions = [a for a in recent_actions if a.platform == platform_filter]
         
-        # 分平台获取动作
-        twitter_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform="twitter"
-        ) if not platform_filter or platform_filter == "twitter" else []
-        
-        reddit_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform="reddit"
-        ) if not platform_filter or platform_filter == "reddit" else []
-        
+        # 如果显式要求 all_actions，才读取磁盘日志并受控返回
+        all_actions = []
+        twitter_actions = []
+        reddit_actions = []
+        if include_all:
+            # 全量动作（上限控制）
+            all_actions = SimulationRunner.get_actions(
+                simulation_id=simulation_id,
+                platform=platform_filter,
+                limit=action_limit
+            )
+            
+            # 分平台获取动作（独立上限控制）
+            if not platform_filter or platform_filter == "twitter":
+                twitter_actions = SimulationRunner.get_actions(
+                    simulation_id=simulation_id,
+                    platform="twitter",
+                    limit=action_limit
+                )
+            if not platform_filter or platform_filter == "reddit":
+                reddit_actions = SimulationRunner.get_actions(
+                    simulation_id=simulation_id,
+                    platform="reddit",
+                    limit=action_limit
+                )
+
+        # 否则保留空数组，避免误导前端当作“全量成功加载”
         # 获取当前轮次的动作（recent_actions 只展示最新一轮）
         current_round = run_state.current_round
-        recent_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform=platform_filter,
-            round_num=current_round
-        ) if current_round > 0 else []
+        if current_round > 0 and not recent_actions:
+            # 前端通常不依赖按轮次全量拉取，只有在状态里没有缓存时进行一次按轮次回退读取
+            recent_actions = SimulationRunner.get_actions(
+                simulation_id=simulation_id,
+                platform=platform_filter,
+                limit=recent_limit,
+                round_num=current_round
+            ) if recent_limit and recent_limit > 0 else []
         
         # 获取基础状态信息
         result = run_state.to_dict()
@@ -2281,8 +2625,13 @@ def get_run_status_detail(simulation_id: str):
         result["twitter_actions"] = [a.to_dict() for a in twitter_actions]
         result["reddit_actions"] = [a.to_dict() for a in reddit_actions]
         result["rounds_count"] = len(run_state.rounds)
-        # recent_actions 只展示当前最新一轮两个平台的内容
-        result["recent_actions"] = [a.to_dict() for a in recent_actions]
+        # recent_actions 只展示当前最新一轮/最近一批内容
+        result["recent_actions"] = recent_actions if recent_actions and isinstance(recent_actions[0], dict) else [a.to_dict() for a in recent_actions]
+        result["all_actions_count"] = len(result["all_actions"])
+        result["recent_actions_count"] = len(result["recent_actions"])
+        result["include_all"] = include_all
+        result["action_limit"] = action_limit
+        result["recent_limit"] = recent_limit
         
         return jsonify({
             "success": True,

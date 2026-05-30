@@ -10,10 +10,7 @@ export function generateOntology(formData) {
     service({
       url: '/api/graph/ontology/generate',
       method: 'post',
-      data: formData,
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
+      data: formData
     })
   )
 }
@@ -28,7 +25,10 @@ export function buildGraph(data) {
     service({
       url: '/api/graph/build',
       method: 'post',
-      data
+      data: {
+        use_local_graph: true,
+        ...data
+      }
     })
   )
 }

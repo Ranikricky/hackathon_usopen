@@ -25,6 +25,7 @@ class StructuredSimulationState:
     project_id: str
     domain_plan: Dict[str, Any] = field(default_factory=dict)
     agents: List[Dict[str, Any]] = field(default_factory=list)
+    graph_context: Dict[str, Any] = field(default_factory=dict)
     time_pockets: List[Dict[str, Any]] = field(default_factory=list)
     state_variables: List[Dict[str, Any]] = field(default_factory=list)
     agent_outputs: List[Dict[str, Any]] = field(default_factory=list)
@@ -45,6 +46,7 @@ class StructuredSimulationState:
             project_id=data["project_id"],
             domain_plan=data.get("domain_plan") or {},
             agents=data.get("agents") or [],
+            graph_context=data.get("graph_context") or {},
             time_pockets=data.get("time_pockets") or [],
             state_variables=data.get("state_variables") or [],
             agent_outputs=data.get("agent_outputs") or [],
@@ -173,6 +175,25 @@ class SimulationStateManager:
                     "heuristics": [],
                     "biases": [archetype.get("likely_bias", "")] if archetype.get("likely_bias") else [],
                     "blind_spots": [],
+                    "allowed_claims": [
+                        "Claims inside this role's information lane, approved evidence, incentives, lived experience, or model responsibility.",
+                        "Conditional judgments that name the assumption that would change the claim.",
+                    ],
+                    "forbidden_claims": [
+                        "Post-cutoff actual outcomes, private hidden data, or exact future facts not present in approved evidence.",
+                        "System-wide numeric certainty from a non-numeric or lived-experience-only role.",
+                    ],
+                    "evidence_scope": [
+                        "approved_domain_contract",
+                        "graph_evidence",
+                        "approved_external_research",
+                        "role_specific_context",
+                    ],
+                    "must_not_know": [
+                        "Actual future outcomes beyond the cutoff date.",
+                        "Private information outside the agent's role or information set.",
+                    ],
+                    "ground_truth_mode": cls._ground_truth_mode_from_role(name),
                     "memory": {
                         "prior_beliefs": [],
                         "past_revisions": [],
@@ -240,6 +261,23 @@ class SimulationStateManager:
                         "heuristics": ["Keep discussion grounded in target variables and validated evidence."],
                         "biases": [],
                         "blind_spots": ["Does not represent a causal stakeholder unless explicitly assigned."],
+                        "allowed_claims": [
+                            "Process, evidence-quality, source, synthesis, and moderation claims within this orchestration role.",
+                        ],
+                        "forbidden_claims": [
+                            "May not invent causal facts, future actuals, or stakeholder preferences not present in evidence or agent turns.",
+                        ],
+                        "evidence_scope": [
+                            "approved_domain_contract",
+                            "simulation_state",
+                            "graph_evidence",
+                            "approved_external_research",
+                        ],
+                        "must_not_know": [
+                            "Post-cutoff actual outcomes.",
+                            "Private domain facts not surfaced by evidence or agents.",
+                        ],
+                        "ground_truth_mode": "synthetic_process_control",
                         "memory": {
                             "prior_beliefs": [],
                             "past_revisions": [],
@@ -283,6 +321,19 @@ class SimulationStateManager:
                         ),
                     })
         return agents
+
+    @classmethod
+    def _ground_truth_mode_from_role(cls, role: str) -> str:
+        role_l = str(role or "").lower()
+        if any(term in role_l for term in ["voter", "consumer", "worker", "household", "patient", "student", "beneficiary", "community", "people"]):
+            return "direct_lived_experience"
+        if any(term in role_l for term in ["pollster", "quant", "scientist", "economist", "analyst", "research", "data"]):
+            return "expert_model"
+        if any(term in role_l for term in ["auditor", "watchdog"]):
+            return "source_audit"
+        if any(term in role_l for term in ["moderator", "mediator", "synthesizer"]):
+            return "synthetic_process_control"
+        return "institutional_signal"
 
     @classmethod
     def _persona_from_role(
@@ -344,8 +395,8 @@ class SimulationStateManager:
             vantage = "the measurement desk where noisy samples, historical baselines, missing data, and uncertainty bands are translated into numbers"
             objective = "keep the forecast numerically coherent and punish unsupported confidence"
             default_tension = "clean numbers can still be wrong if the frame is wrong"
-            background = "Works from historical baselines, swing models, sample-quality checks, turnout assumptions, and scenario bands; treats anecdotes as hypotheses, not proof."
-            knowledge_boundary = "Can miss local emotional shifts that are real but not yet measurable."
+            background = "Works from historical baselines, measurement quality checks, comparable units, model assumptions, and scenario bands; treats anecdotes as hypotheses, not proof."
+            knowledge_boundary = "Can miss ground-level shifts that are real but not yet measurable."
         elif any(term in role_l for term in ["journalist", "media", "narrative"]):
             vantage = "the public narrative layer where repeated stories shape what voters and institutions think is plausible"
             objective = "track which claims become salient enough to change behavior"
@@ -401,11 +452,12 @@ class SimulationStateManager:
             background = "Trained in fact-checking, source hierarchy, leakage detection, contradiction logging, evidence grading, and claim-to-source traceability."
             knowledge_boundary = "Does not decide strategy; it decides whether evidence is strong enough to support a claim."
         else:
-            vantage = "a specialized vantage point created from the prompt's causal map"
-            objective = "stress-test the simulation from this role's information advantage"
-            default_tension = "the role may see one channel clearly while missing the wider system"
-            background = "Has a narrow causal window from the prompt-derived role and uses it to stress-test the common forecast."
-            knowledge_boundary = "May lack enough context outside its assigned causal channel."
+            clean_role = display_name or role or "this actor"
+            vantage = f"the practical world of {clean_role}, where incentives, constraints, and private reactions can differ from the public story"
+            objective = f"make the room account for what {clean_role} can see, do, withhold, or misread"
+            default_tension = "one actor can understand its own lane well while still misreading the wider system"
+            background = "Brings role-specific exposure, incentives, information gaps, and practical constraints into the simulation."
+            knowledge_boundary = "May overread its own lane and needs other agents to test whether the signal generalizes."
 
         opening_position = archetype.get("causal_role") or objective
         if str(opening_position).lower().startswith("represents or moves part of the simulation outcome through"):
@@ -578,7 +630,7 @@ class SimulationStateManager:
             direct_stake = "evidence integrity, cutoff compliance, and claim-to-source discipline"
             downside_exposure = "future leakage or unsupported claims enter the official simulation state"
         else:
-            direct_stake = archetype.get("causal_role") or "outcome exposure through its assigned causal channel"
+            direct_stake = archetype.get("causal_role") or "role-specific incentives, information gaps, and practical constraints"
             downside_exposure = "may misread the wider system outside its information lane"
 
         return {
@@ -621,7 +673,7 @@ class SimulationStateManager:
         for terms, values in mapping:
             if any(term in role_l for term in terms):
                 topics.extend(values)
-        return list(dict.fromkeys(topics)) or ["assigned causal channel"]
+        return list(dict.fromkeys(topics)) or ["role-specific incentives", "information gaps", "practical constraints"]
 
     @classmethod
     def empty_scenario_outputs(cls, domain_plan: Dict[str, Any]) -> Dict[str, Any]:

@@ -24,8 +24,8 @@
         <LanguageSwitcher />
         <div class="step-divider"></div>
         <div class="workflow-step">
-          <span class="step-num">Step 2/5</span>
-          <span class="step-name">{{ $tm('main.stepNames')[1] }}</span>
+          <span class="step-num">Workbench</span>
+          <span class="step-name">Structured Simulation</span>
         </div>
         <div class="step-divider"></div>
         <span class="status-indicator" :class="statusClass">
@@ -48,17 +48,13 @@
         />
       </div>
 
-      <!-- Right Panel: Step2 环境搭建 -->
+      <!-- Right Panel: Horizon XL Structured Workbench -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
-        <Step2EnvSetup
+        <HorizonStructuredWorkbench
           :simulationId="currentSimulationId"
           :projectData="projectData"
           :graphData="graphData"
-          :systemLogs="systemLogs"
-          @go-back="handleGoBack"
-          @next-step="handleNextStep"
           @add-log="addLog"
-          @update-status="updateStatus"
         />
       </div>
     </main>
@@ -69,7 +65,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
-import Step2EnvSetup from '../components/Step2EnvSetup.vue'
+import HorizonStructuredWorkbench from '../components/HorizonStructuredWorkbench.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
@@ -86,7 +82,7 @@ const props = defineProps({
 })
 
 // Layout State
-const viewMode = ref('split')
+const viewMode = ref('workbench')
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)
@@ -117,7 +113,7 @@ const statusClass = computed(() => {
 const statusText = computed(() => {
   if (currentStatus.value === 'error') return 'Error'
   if (currentStatus.value === 'completed') return 'Ready'
-  return 'Preparing'
+  return 'Structured'
 })
 
 // --- Helpers ---
@@ -326,9 +322,10 @@ onMounted(async () => {
 .app-header {
   height: 60px;
   border-bottom: 1px solid #EAEAEA;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) auto minmax(300px, 1fr);
   align-items: center;
-  justify-content: space-between;
+  gap: 18px;
   padding: 0 24px;
   background: #FFF;
   z-index: 100;
@@ -344,9 +341,8 @@ onMounted(async () => {
 }
 
 .header-center {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  justify-self: center;
+  min-width: 0;
 }
 
 .view-switcher {
@@ -378,7 +374,9 @@ onMounted(async () => {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  justify-self: end;
+  gap: 12px;
+  min-width: 0;
 }
 
 .workflow-step {
@@ -386,6 +384,7 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   font-size: 14px;
+  white-space: nowrap;
 }
 
 .step-num {
@@ -444,5 +443,21 @@ onMounted(async () => {
 
 .panel-wrapper.left {
   border-right: 1px solid #EAEAEA;
+}
+
+@media (max-width: 1180px) {
+  .app-header {
+    grid-template-columns: auto 1fr auto;
+    padding: 0 16px;
+  }
+
+  .workflow-step,
+  .step-divider {
+    display: none;
+  }
+
+  .switch-btn {
+    padding: 6px 12px;
+  }
 }
 </style>

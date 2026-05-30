@@ -150,7 +150,50 @@ def _is_safe_public_url(url: str) -> bool:
         return False
     if re.match(r"^172\.(1[6-9]|2\d|3[0-1])\.", host):
         return False
+    lowered_url = url.lower()
+    if any(fragment in lowered_url for fragment in ["cookieabsent", "/login", "/signin", "/account"]):
+        return False
     return True
+
+
+STOP_RESEARCH_WORDS = {
+    "using", "only", "information", "available", "simulate", "simulation",
+    "question", "forecast", "predict", "analysis", "scenario", "scenarios",
+    "output", "numeric", "monthly", "quarterly", "weekly", "daily", "paths",
+    "path", "next", "months", "years", "after", "before", "cutoff", "date",
+    "with", "from", "through", "latest", "evidence", "source", "sources",
+    "report", "reports", "data", "numbers", "context", "market",
+    "january", "february", "march", "april", "june", "july", "august",
+    "september", "october", "november", "december",
+}
+
+
+def _research_keywords(text: str, limit: int = 18) -> List[str]:
+    """Extract reusable research keywords from the prompt without domain branches."""
+    tokens = []
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9-]{3,}", text or ""):
+        lowered = token.lower().strip("-")
+        if lowered in STOP_RESEARCH_WORDS or re.fullmatch(r"\d{4}", lowered):
+            continue
+        if lowered not in tokens:
+            tokens.append(lowered)
+        if len(tokens) >= limit:
+            break
+    return tokens
+
+
+def _research_topic(text: str) -> str:
+    keywords = _research_keywords(text, limit=10)
+    return " ".join(keywords[:10]) or "future scenario"
+
+
+def _source_relevance_score(prompt_keywords: List[str], title: str, url: str, excerpt: str) -> int:
+    haystack = f"{title} {url} {excerpt}".lower()
+    score = 0
+    for keyword in prompt_keywords:
+        if keyword in haystack:
+            score += 1
+    return score
 
 
 class ExternalResearchService:
@@ -174,6 +217,7 @@ class ExternalResearchService:
             return {"enabled": False, "queries": [], "sources": [], "markdown": ""}
 
         queries = self.build_queries(prompt, additional_context)[: self.max_queries]
+        prompt_keywords = _research_keywords(f"{prompt or ''}\n{additional_context or ''}", limit=18)
         sources: List[ResearchSource] = []
         seen_urls = set()
 
@@ -184,6 +228,10 @@ class ExternalResearchService:
                     continue
                 seen_urls.add(url)
                 text = self.fetch_text(url)
+                relevance = _source_relevance_score(prompt_keywords, result.get("title", ""), url, text)
+                if prompt_keywords and relevance < 2:
+                    logger.debug("Skipping weakly relevant source url=%s score=%s", url, relevance)
+                    continue
                 sources.append(
                     ResearchSource(
                         query=query,
@@ -213,15 +261,14 @@ class ExternalResearchService:
         uploaded context itself, not from hardcoded query branches.
         """
         text = TextProcessor.preprocess_text(f"{prompt or ''}\n{additional_context or ''}")
-        compact = " ".join(text.split())[:180]
-        base = compact or "future scenario analysis"
+        base = _research_topic(text)
         queries = [
-            f"{base} latest evidence data numbers source",
+            f"{base} latest data statistics source",
+            f"{base} industry market report analysis",
             f"{base} research paper literature review",
             f"{base} news analysis recent context",
-            f"{base} expert blog analysis",
-            f"{base} site:reddit.com public discussion",
-            f"{base} dataset statistics historical context",
+            f"{base} expert blog discussion",
+            f"{base} dataset historical statistics",
         ]
 
         cutoff = self._extract_cutoff_hint(text)

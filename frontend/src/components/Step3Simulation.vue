@@ -325,6 +325,8 @@ const runStatus = ref({})
 const allActions = ref([]) // 所有动作（增量累积）
 const actionIds = ref(new Set()) // 用于去重的动作ID集合
 const scrollContainer = ref(null)
+const MAX_TIMELINE_ACTIONS = 600
+const MAX_TRACKED_ACTION_IDS = 4000
 
 // Computed
 // 按时间顺序显示动作（最新的在最后面，即底部）
@@ -407,11 +409,53 @@ const doStartSimulation = async () => {
       addLog(t('log.setMaxRounds', { rounds: props.maxRounds }))
     }
     
-    addLog(t('log.graphMemoryUpdateEnabled'))
+    const tryStart = async (graphMemoryEnabled) => {
+      const payload = {
+        ...params,
+        enable_graph_memory_update: graphMemoryEnabled
+      }
+      if (graphMemoryEnabled) {
+        addLog(t('log.graphMemoryUpdateEnabled'))
+      } else {
+        addLog(t('log.graphMemoryUpdateDisabledFallback'))
+      }
+      return await startSimulation(payload)
+    }
+
+    const isGraphMemoryRefused = (error) => {
+      if (!error) return false
+      const msg = String(error.message || '').toLowerCase()
+      const apiError = error.apiError?.error || ''
+      return (
+        msg.includes('graphidrequiredformemory') ||
+        msg.includes('graph id required') ||
+        msg.includes('graphid') ||
+        String(apiError).toLowerCase().includes('graph') && String(apiError).toLowerCase().includes('memory')
+      )
+    }
+
+    let res = null
+    try {
+      res = await tryStart(true)
+    } catch (graphErr) {
+      if (isGraphMemoryRefused(graphErr)) {
+        addLog(t('log.graphMemoryFallback'))
+        try {
+          res = await tryStart(false)
+        } catch (fallbackErr) {
+          startError.value = fallbackErr.message
+          addLog(t('log.startFailed', {
+            error: fallbackErr?.apiError?.error || fallbackErr.message || t('common.unknownError')
+          }))
+          emit('update-status', 'error')
+          return
+        }
+      } else {
+        throw graphErr
+      }
+    }
     
-    const res = await startSimulation(params)
-    
-    if (res.success && res.data) {
+    if (res && res.success && res.data) {
       if (res.data.force_restarted) {
         addLog(t('log.oldSimCleared'))
       }
@@ -423,9 +467,13 @@ const doStartSimulation = async () => {
       
       startStatusPolling()
       startDetailPolling()
+      if (res?.data?.graph_memory_update_enabled === false && params.enable_graph_memory_update === true) {
+        addLog(t('log.graphMemoryUnavailable'))
+      }
     } else {
-      startError.value = res.error || '启动失败'
-      addLog(t('log.startFailed', { error: res.error || t('common.unknownError') }))
+      const errMessage = res?.error || '启动失败'
+      startError.value = errMessage
+      addLog(t('log.startFailed', { error: errMessage }))
       emit('update-status', 'error')
     }
   } catch (err) {
@@ -559,17 +607,20 @@ const checkPlatformsCompleted = (data) => {
 
 const fetchRunStatusDetail = async () => {
   if (!props.simulationId) return
-  
+
   try {
-    const res = await getRunStatusDetail(props.simulationId)
+    const res = await getRunStatusDetail(props.simulationId, {
+      include_all: false,
+      recent_limit: 120
+    })
     
     if (res.success && res.data) {
-      // 使用 all_actions 获取完整的动作列表
-      const serverActions = res.data.all_actions || []
+      // 使用 recent_actions 获取本轮增量动作，减少前端渲染压力
+      const serverActions = res.data.recent_actions || []
       
-      // 增量添加新动作（去重）
-      let newActionsAdded = 0
-      serverActions.forEach(action => {
+      // 按时间顺序拼接，确保时间线从上到下为旧到新
+      const orderedActions = [...serverActions].reverse()
+      orderedActions.forEach(action => {
         // 生成唯一ID
         const actionId = action.id || `${action.timestamp}-${action.platform}-${action.agent_id}-${action.action_type}`
         
@@ -579,9 +630,24 @@ const fetchRunStatusDetail = async () => {
             ...action,
             _uniqueId: actionId
           })
-          newActionsAdded++
         }
       })
+
+      // 限制 timeline 长度，避免长期运行时内存和渲染持续膨胀
+      if (allActions.value.length > MAX_TIMELINE_ACTIONS) {
+        allActions.value = allActions.value.slice(-MAX_TIMELINE_ACTIONS)
+      }
+
+      if (actionIds.value.size > MAX_TRACKED_ACTION_IDS) {
+        const activeIds = new Set()
+        allActions.value.forEach(action => {
+          const id = action.id || `${action.timestamp}-${action.platform}-${action.agent_id}-${action.action_type}`
+          if (id) {
+            activeIds.add(id)
+          }
+        })
+        actionIds.value = activeIds
+      }
       
       // 不自动滚动，让用户自由查看时间轴
       // 新动作会在底部追加
