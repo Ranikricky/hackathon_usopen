@@ -4,10 +4,10 @@
   "description": "Horizon XL - general-purpose agentic future simulation lab",
   "scripts": {
     "setup": "npm install && cd frontend && npm install",
-    "setup:backend": "if [ ! -x .venv/bin/python ]; then /opt/homebrew/bin/python3.11 -m venv .venv || python3.11 -m venv .venv; fi && .venv/bin/python -m pip install -r backend/requirements.txt",
+    "setup:backend": "if [ ! -x .venv/bin/python ]; then python3.11 -m venv .venv || python3 -m venv .venv; fi && .venv/bin/python -m pip install -r backend/requirements.txt",
     "setup:all": "npm run setup && npm run setup:backend",
     "dev": "concurrently --kill-others -n \"backend,frontend\" -c \"green,cyan\" \"npm run backend\" \"npm run frontend\"",
-    "backend": "cd backend && ../.venv/bin/python run.py",
+    "backend": "if [ -x backend/.venv/bin/python ]; then cd backend && .venv/bin/python run.py; elif [ -x .venv/bin/python ]; then cd backend && ../.venv/bin/python run.py; else npm run setup:backend && cd backend && ../.venv/bin/python run.py; fi",
     "frontend": "cd frontend && npm run dev",
     "build": "cd frontend && npm run build",
     "check:frontend": "cd frontend && npm run build",
