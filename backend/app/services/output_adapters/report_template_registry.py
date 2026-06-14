@@ -84,17 +84,17 @@ def select_template_id(domain: str = "", requested: str = "") -> str:
     if requested in TEMPLATE_REGISTRY:
         return requested
     domain_l = (domain or "").lower()
-    if domain_l == "election":
+    if "election" in domain_l:
         return "election_forecast"
-    if domain_l in {"oil", "commodity", "market"}:
+    if any(term in domain_l for term in ["oil", "commodity", "market", "energy", "shipping"]):
         return "commodity_market_note"
-    if domain_l == "ai_future":
+    if "ai" in domain_l:
         return "ai_adoption_whitepaper"
-    if domain_l in {"geopolitics", "geopolitical"}:
+    if any(term in domain_l for term in ["geopolitic", "military", "conflict", "risk"]):
         return "geopolitical_risk_memo"
-    if domain_l in {"business", "strategy"}:
+    if any(term in domain_l for term in ["business", "strategy"]):
         return "business_strategy_memo"
-    if domain_l in {"narrative", "fiction"}:
+    if any(term in domain_l for term in ["narrative", "fiction", "literary", "story"]):
         return "narrative_fiction_forecast"
     return "generic_forecast_memo"
 

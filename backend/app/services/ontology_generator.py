@@ -131,9 +131,10 @@ NON_ACTOR_PHRASES = {
 }
 
 PROCESS_OR_PARAMETER_ROLE_PHRASES = {
-    "simulation moderator", "moderator", "negotiation mediator", "mediator",
+    "simulation moderator", "moderator", "negotiation mediator",
     "evidence auditor", "evidence auditors", "external research scout",
     "research scout", "data retrieval analyst", "quantitative synthesizer",
+    "scenario synthesizer", "scenario integrator", "quant scenario", "quant / scenario",
     "forecast horizon", "target variable", "state variable", "scenario path",
     "time pocket", "pocket", "validation", "required output",
 }
@@ -212,8 +213,26 @@ def _context_label(text: str) -> str:
     return " ".join(cleaned.split()[:8]).strip() or "custom simulation"
 
 
+def _substantive_context_for_domain_checks(text: str) -> str:
+    """Remove forbidden examples and report/validation instructions before domain checks."""
+    cleaned = text or ""
+    cleaned = re.split(
+        r"\n\s*(?:=+\s*)?(?:VALIDATION REQUIREMENTS|REQUIRED REPORT FORMAT|STYLE REQUIREMENTS)\b",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    cleaned = re.sub(
+        r"\n\s*(?:do\s+not\s+use|do\s+not\s+include|avoid|forbidden|must\s+not\s+use)\s*:\s*(?:\n\s*[-*•]\s*.+?)+(?=\n\s*\n|\n\s*=+|\Z)",
+        "\n",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned
+
+
 def _is_election_context(text: str) -> bool:
-    lowered = (text or "").lower()
+    lowered = _substantive_context_for_domain_checks(text).lower()
     return bool(re.search(
         r"\b(election|polling|vote\s+share|seat\s+share|turnout|voters?|candidate|candidates|ballot|hung\s+assembly|majority\s+mark)\b",
         lowered,
@@ -221,7 +240,7 @@ def _is_election_context(text: str) -> bool:
 
 
 def _is_narrative_context(text: str) -> bool:
-    lowered = (text or "").lower()
+    lowered = _substantive_context_for_domain_checks(text).lower()
     return bool(re.search(
         r"\b(novel|book[- ]canon|canon|fiction|story|storyline|characters?|chapter|unpublished|"
         r"song\s+of\s+ice\s+and\s+fire|asoiaf|winds\s+of\s+winter|foreshadowing|prophecy|throne|thrones?)\b",
@@ -253,7 +272,7 @@ def _extract_numbered_agent_list(text: str, limit: int = 40) -> List[Tuple[str, 
 
     normalized = text.replace("—", "-").replace("–", "-")
     section_match = re.search(
-        r"(?:create|generate|use|define)\s+(?:\d+\s+)?(?:[\w -]+\s+)?agents?\s*:?\s*(.+?)(?:\n\s*(?:agents?\s+must|agents?\s+should|each\s+agent|for every agent|run sequential|run the simulation|time[- ]?pockets?|run four scenarios|required output|rules)\b|$)",
+        r"(?:create|generate|use|define)\s+(?:\d+\s+)?(?:[\w -]+\s+)?agents?\s*:?\s*(.+?)(?:\n\s*(?:agents?\s+must|agents?\s+should|each\s+agent|for every agent|agent behavior rules?|run sequential|run the simulation|required time[- ]?pockets?|time[- ]?pockets?|debate format|validation requirements|required report format|style requirements|run four scenarios|required output|rules)\b|$)",
         normalized,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -261,11 +280,26 @@ def _extract_numbered_agent_list(text: str, limit: int = 40) -> List[Tuple[str, 
         return []
 
     section = section_match.group(1)
+    negative = re.search(
+        r"\n\s*(?:do\s+not\s+use|do\s+not\s+include|avoid|forbidden|must\s+not\s+use)\b\s*[:\n]",
+        section,
+        flags=re.IGNORECASE,
+    )
+    if negative:
+        section = section[:negative.start()]
     items: List[Tuple[str, str]] = []
-    for match in re.finditer(r"(?:^|\n)\s*(?:\d+[\.)]|[-*•])\s+(.+?)(?=\n\s*(?:\d+[\.)]|[-*•])|\Z)", section, flags=re.DOTALL):
+    for line in section.splitlines():
+        # Keep one numbered/bulleted line as one actor. The previous DOTALL
+        # regex swallowed intervening category headings, producing fused names
+        # like "NuclearExpertDiplomaticStateActors".
+        match = re.match(r"^\s*(?:\d+[\.)]|[-*•])\s+(.+?)\s*$", line)
+        if not match:
+            continue
         raw = re.sub(r"\s+", " ", match.group(1)).strip(" .;:-")
         raw = re.split(r"\b(?:bias|trusted evidence|blind spots|numeric forecast)\b", raw, maxsplit=1, flags=re.IGNORECASE)[0].strip()
         if not raw or len(raw) > 90:
+            continue
+        if any(phrase in raw.lower() for phrase in PROCESS_OR_PARAMETER_ROLE_PHRASES):
             continue
         name = _to_pascal_case(raw)
         if name and name not in {"Unknown", "Person", "Organization"}:
@@ -656,9 +690,10 @@ def _target_edge_count(entity_count: int, relationship_count: int, text: str) ->
 def _agent_role(name: str, context_text: str = "") -> str:
     """Classify an agent/entity name into a broad role for relationship design."""
     lowered = re.sub(r"([a-z])([A-Z])", r"\1 \2", name).lower()
+    words = set(re.findall(r"[a-z0-9]+", lowered))
     election_like = _is_election_context(context_text)
     narrative_like = _is_narrative_context(context_text)
-    if election_like and any(term in lowered for term in ["strategist", "campaign", "party", "candidate"]):
+    if election_like and any(term in words for term in ["strategist", "campaign", "party", "candidate"]):
         return "campaign"
     if narrative_like and any(term in lowered for term in [
         "strategist", "faction", "court", "regime", "military", "naval", "magic",
@@ -666,19 +701,23 @@ def _agent_role(name: str, context_text: str = "") -> str:
         "advisor", "claimant", "dynasty", "prophecy", "dragon", "throne",
     ]):
         return "power_actor"
-    if any(term in lowered for term in ["voter", "beneficiary", "rural", "urban", "minority", "youth", "worker", "consumer", "public", "household"]):
+    if any(term in words for term in ["strategist", "planner", "adviser", "advisor", "diplomat", "hardliner", "security", "military", "government", "official", "council", "operations"]):
+        return "power_actor"
+    if any(term in words for term in ["voter", "beneficiary", "rural", "urban", "minority", "youth", "worker", "consumer", "public", "household"]):
         return "constituency"
-    if any(term in lowered for term in ["pollster", "data scientist", "data", "quant", "model"]):
+    if any(term in words for term in ["pollster", "data", "quant", "model"]):
         return "data"
-    if any(term in lowered for term in ["journalist", "media", "narrative", "influencer"]):
+    if "data scientist" in lowered:
+        return "data"
+    if any(term in words for term in ["journalist", "media", "narrative", "influencer"]):
         return "narrative"
-    if any(term in lowered for term in ["observer", "booth", "field", "reporter", "watchdog", "auditor"]):
+    if any(term in words for term in ["observer", "booth", "field", "reporter", "watchdog", "auditor"]):
         return "ground_signal"
-    if any(term in lowered for term in ["business", "industry", "market", "investor", "trader", "producer", "supplier"]):
+    if any(term in words for term in ["business", "industry", "market", "investor", "trader", "producer", "supplier"]):
         return "economic_signal"
-    if any(term in lowered for term in ["negotiator", "mediator", "alliance", "coalition"]):
+    if any(term in words for term in ["negotiator", "mediator", "alliance", "coalition"]):
         return "negotiator"
-    if any(term in lowered for term in ["moderator", "research", "synthesizer"]):
+    if any(term in words for term in ["moderator", "research", "synthesizer"]):
         return "process"
     return "actor"
 

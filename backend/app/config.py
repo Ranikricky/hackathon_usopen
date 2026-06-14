@@ -35,6 +35,8 @@ class Config:
     PLANNER_LLM_TIMEOUT_SECONDS = float(os.environ.get('PLANNER_LLM_TIMEOUT_SECONDS', '18'))
     ONTOLOGY_LLM_TIMEOUT_SECONDS = float(os.environ.get('ONTOLOGY_LLM_TIMEOUT_SECONDS', '18'))
     AGENT_LLM_TIMEOUT_SECONDS = float(os.environ.get('AGENT_LLM_TIMEOUT_SECONDS', '12'))
+    LLM_CURL_FALLBACK_ENABLED = os.environ.get('LLM_CURL_FALLBACK_ENABLED', 'true').lower() == 'true'
+    LLM_REQUIRED_FOR_PLANNING = os.environ.get('LLM_REQUIRED_FOR_PLANNING', 'true').lower() == 'true'
     
     # Zep.
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Tuple
 from ..models.simulation_state import SimulationStateManager, StructuredSimulationState
 from .numeric_validation import NumericValidationService
 from .forecast_ledger import ForecastLedgerBuilder
+from .forecast_artifacts import ForecastArtifactBuilder
 from ..utils.logger import get_logger
 
 
@@ -49,6 +50,16 @@ class StructuredSimulationRunner:
         )
         graph_brain = self._build_graph_brain(graph_context or {}, domain_plan, evidence_text)
         state.graph_context = graph_brain
+        artifacts = ForecastArtifactBuilder().build_all(
+            domain_plan=domain_plan,
+            agents=agents,
+            evidence_text=evidence_text,
+            graph_brain=graph_brain,
+        )
+        state.forecast_thesis = artifacts["forecast_thesis"]
+        state.assumption_registry = artifacts["assumption_registry"]
+        state.dispute_registry = artifacts["dispute_registry"]
+        state.debate_readiness = artifacts["debate_readiness"]
 
         state.agent_outputs = []
         state.scenario_outputs = {scenario: {} for scenario in self._required_scenarios(domain_plan)}
@@ -63,12 +74,39 @@ class StructuredSimulationRunner:
             "by_target": {},
             "agent_disagreement": {},
             "graph_brain": graph_brain,
+            "forecast_thesis": state.forecast_thesis,
+            "assumption_registry": state.assumption_registry,
+            "dispute_registry": state.dispute_registry,
+            "debate_readiness": state.debate_readiness,
         }
 
         targets = [
             variable for variable in domain_plan.get("target_variables", [])
             if variable.get("required", True)
         ] or [{"name": "primary_outcome", "unit": "index", "required": True}]
+
+        if not state.debate_readiness.get("ready", False):
+            state.validation = {
+                "passed": False,
+                "errors": [
+                    "Debate readiness failed: " + issue
+                    for issue in state.debate_readiness.get("blocking_issues", [])
+                ] or ["Debate readiness failed."],
+                "warnings": state.debate_readiness.get("warnings", []),
+                "missing_agents": [],
+                "missing_variables": [
+                    target.get("name")
+                    for target in targets
+                    if isinstance(target, dict) and target.get("name")
+                ],
+                "missing_dates": [],
+                "missing_scenarios": [],
+                "numeric_quality_score": 0.0,
+            }
+            state.forecast_ledger = ForecastLedgerBuilder().build(state.to_dict())
+            state.aggregated_outputs["forecast_ledger"] = state.forecast_ledger
+            return SimulationStateManager.save(state)
+
         forecast_periods = self._forecast_periods(domain_plan, state.time_pockets)
         state.aggregated_outputs["forecast_horizon"] = {
             "granularity": (domain_plan.get("forecast_horizon") or {}).get("granularity") or "event_triggered",
@@ -127,9 +165,10 @@ class StructuredSimulationRunner:
         state.aggregated_outputs["debate_impact"] = self._debate_impact_summary(debate_revisions)
         state.aggregated_outputs["report_template"] = (
             (domain_plan.get("domain_contract") or {}).get("report_template")
-            or "generic_forecast_memo"
+            or self._report_template_for_plan(domain_plan)
         )
-        state.aggregated_outputs["forecast_ledger"] = ForecastLedgerBuilder().build(state.to_dict())
+        state.forecast_ledger = ForecastLedgerBuilder().build(state.to_dict())
+        state.aggregated_outputs["forecast_ledger"] = state.forecast_ledger
         # Rebuild once so the visible transcript and quant summaries reflect the debated state.
         state.discussion_transcript = self._build_discussion_transcript(
             state=state,
@@ -145,7 +184,8 @@ class StructuredSimulationRunner:
 
         validation = NumericValidationService().validate(state.to_dict())
         state.validation = validation
-        state.aggregated_outputs["forecast_ledger"] = ForecastLedgerBuilder().build(state.to_dict())
+        state.forecast_ledger = ForecastLedgerBuilder().build(state.to_dict())
+        state.aggregated_outputs["forecast_ledger"] = state.forecast_ledger
         saved = SimulationStateManager.save(state)
         logger.info(
             "Structured simulation saved: %s agents=%s targets=%s outputs=%s validation=%s",
@@ -156,6 +196,24 @@ class StructuredSimulationRunner:
             validation.get("passed"),
         )
         return saved
+
+    def _report_template_for_plan(self, domain_plan: Dict[str, Any]) -> str:
+        domain_l = str((domain_plan or {}).get("domain") or "").lower()
+        question_l = str((domain_plan or {}).get("user_question") or "").lower()
+        text = f"{domain_l} {question_l}"
+        if "election" in text or any(term in text for term in ["vote", "seat", "turnout"]):
+            return "election_forecast"
+        if any(term in text for term in ["oil", "commodity", "price", "shipping", "lng", "energy"]):
+            return "commodity_market_note"
+        if "ai" in text or "adoption" in text:
+            return "ai_adoption_whitepaper"
+        if any(term in text for term in ["geopolitic", "military", "conflict", "naval", "war", "escalation"]):
+            return "geopolitical_risk_memo"
+        if any(term in text for term in ["story", "fiction", "canon", "character", "throne", "battle"]):
+            return "narrative_fiction_forecast"
+        if any(term in text for term in ["business", "strategy", "market entry", "consumer trend"]):
+            return "business_strategy_memo"
+        return "generic_forecast_memo"
 
     def _build_graph_brain(
         self,
@@ -315,6 +373,22 @@ class StructuredSimulationRunner:
         if self._is_meta_instruction_note(bare) or self._looks_like_metric_request_line(bare):
             return True
         bad_fragments = [
+            "pocket_id",
+            "'start':",
+            '"start":',
+            "'end':",
+            '"end":',
+            "'events':",
+            '"events":',
+            "auto', 'end'",
+            "targets contain placeholder",
+            "time pockets include",
+            "style requirements",
+            "forecast the following",
+            "source of truth",
+            "semantic validation",
+            "weak debate quality",
+            "report-template mismatch",
             "agents must",
             "agent must",
             "for every agent",
@@ -340,12 +414,19 @@ class StructuredSimulationRunner:
             "run the simulation",
             "forecast these",
             "simulate sequentially",
+            "what are the most likely paths",
+            "next 90 days, divided into",
+            "forecast horizon",
             "what would change their view",
             "challenge another agent",
             "cite evidence",
             "make a concrete claim",
         ]
         if any(fragment in lowered for fragment in bad_fragments):
+            return True
+        if lowered.startswith(("{", "}", "[", "]")) or re.search(r"[{}]{1,}.*:", lowered):
+            return True
+        if re.match(r"^(?:days?\s+\d+|days?\s+\d+\s*[–-]\s*\d+|scenario synthesis|forecast ledger|current state)\b", lowered):
             return True
         # A numbered list item like "2. Bolton regime defender" is an actor hint,
         # not a dated fact or numeric anchor. Keep numbered evidence only when it
@@ -361,6 +442,20 @@ class StructuredSimulationRunner:
             if not has_observable_context:
                 return True
         return False
+
+    def _has_real_numeric_measure(self, cleaned: str) -> bool:
+        """True only for real measurements, dates, money, ranges, or unit-bearing values."""
+        text = str(cleaned or "")
+        without_ordinal = re.sub(r"^\s*\d{1,2}\.\s+", "", text)
+        return bool(re.search(
+            r"[$€£₹]\s?\d|\b(?:19|20)\d{2}\b|\d[\d,]*(?:\.\d+)?\s*(?:%|percent|bps|basis points|"
+            r"million|billion|trillion|m\b|bn\b|tn\b|kwh|mwh|gwh|twh|tons?|tonnes?|metric tons?|"
+            r"barrels?|bpd|mb/d|usd|dollars?|seats?|votes?|months?|years?|days?|vessels?|ships?|seafarers?|"
+            r"routes?|premiums?|rates?)|"
+            r"\d[\d,]*(?:\.\d+)?\s*[-–]\s*\d[\d,]*(?:\.\d+)?",
+            without_ordinal,
+            flags=re.IGNORECASE,
+        ))
 
     def _graph_missing_target_evidence(self, target_names: List[str], evidence_cards: List[str]) -> List[str]:
         missing: List[str] = []
@@ -1102,9 +1197,22 @@ class StructuredSimulationRunner:
 
     def _probability_anchor_from_target(self, label: str, scenario: str) -> float:
         label_l = str(label or "").lower()
+        label_text = label_l.replace("_", " ").replace("-", " ")
         scenario_l = str(scenario or "").lower()
         if label_l and any(token in scenario_l for token in re.split(r"[_\s/]+", label_l) if len(token) >= 3):
             return 62.0
+        # Generic conflict/geopolitical probability priors. These are keyed to
+        # reusable target semantics, not to any specific country or prompt.
+        if any(term in label_text for term in ["truce", "ceasefire", "deal", "negotiated", "de escalation", "deescalation", "settlement"]):
+            return 44.0
+        if any(term in label_text for term in ["partial disruption", "gray zone", "grey zone", "limited disruption", "continued disruption"]):
+            return 48.0
+        if any(term in label_text for term in ["cyber", "proxy", "militia", "houthi", "hezbollah", "red sea"]):
+            return 34.0
+        if any(term in label_text for term in ["renewed strike", "strikes", "direct retaliation", "unilateral escalation", "naval incident"]):
+            return 30.0
+        if any(term in label_text for term in ["severe disruption", "near closure", "closure", "wider war", "broader regional war", "regional war"]):
+            return 18.0
         if any(term in label_l for term in ["hung", "fragment", "gridlock"]) and any(term in scenario_l for term in ["hung", "fragment", "gridlock"]):
             return 68.0
         return 28.0
@@ -1435,8 +1543,6 @@ class StructuredSimulationRunner:
         vote_targets = [str(target.get("name") or "") for target in targets if self._is_composition_target(str(target.get("name") or ""), "_vote_share")]
         final: Dict[str, Any] = {
             "scenario": base_key,
-            "seat_forecast": {},
-            "vote_share_forecast": {},
             "target_forecast": {},
         }
         for target in [str(item.get("name") or "") for item in targets if item.get("name")]:
@@ -1448,17 +1554,17 @@ class StructuredSimulationRunner:
                     "agent_count": points[-1].get("agent_count"),
                     "unit": next((item.get("unit") for item in targets if item.get("name") == target), ""),
                 }
-        for target in seat_targets:
-            points = base.get(target) or []
-            if points:
-                label = target[: -len("_seats")]
-                final["seat_forecast"][label] = points[-1].get("value")
         for target in vote_targets:
             points = base.get(target) or []
             if points:
                 label = target[: -len("_vote_share")]
-                final["vote_share_forecast"][label] = points[-1].get("value")
-        if final["seat_forecast"]:
+                final.setdefault("vote_share_forecast", {})[label] = points[-1].get("value")
+        for target in seat_targets:
+            points = base.get(target) or []
+            if points:
+                label = target[: -len("_seats")]
+                final.setdefault("seat_forecast", {})[label] = points[-1].get("value")
+        if final.get("seat_forecast"):
             winner, seats = max(final["seat_forecast"].items(), key=lambda item: float(item[1] or 0))
             total = self._extract_total_count(evidence_text) or sum(float(value or 0) for value in final["seat_forecast"].values())
             majority = int(total // 2 + 1) if total else None
@@ -1752,6 +1858,18 @@ class StructuredSimulationRunner:
             transcript.append(self._turn(
                 pocket_id,
                 label,
+                "thesis",
+                "Forecast Thesis",
+                self._thesis_presentation_turn(state.forecast_thesis, state.assumption_registry, state.dispute_registry),
+                turn_type="thesis_presentation",
+                metadata={
+                    "thesis_id": state.forecast_thesis.get("thesis_id"),
+                    "linked_targets": state.forecast_thesis.get("linked_targets", []),
+                },
+            ))
+            transcript.append(self._turn(
+                pocket_id,
+                label,
                 "graph_brain",
                 "Signal Map Conscience",
                 self._graph_conscience_turn(graph_brain, label, key_targets),
@@ -1826,6 +1944,7 @@ class StructuredSimulationRunner:
                 causal_context=causal_context,
                 evidence_notes=evidence_notes,
                 relationship_topology=relationship_topology,
+                disputes=state.dispute_registry,
             ):
                 transcript.append(round_turn)
 
@@ -1882,19 +2001,46 @@ class StructuredSimulationRunner:
             "If a speaker drifts away from these lanes, I will force a correction before the next pocket."
         )
 
+    def _thesis_presentation_turn(
+        self,
+        thesis: Dict[str, Any],
+        assumptions: List[Dict[str, Any]],
+        disputes: List[Dict[str, Any]],
+    ) -> str:
+        statement = thesis.get("statement") or "No forecast thesis was created."
+        drivers = ", ".join(str(item) for item in (thesis.get("core_drivers") or [])[:5]) or "no core drivers identified"
+        assumption_line = "; ".join(
+            str(item.get("statement") or "")
+            for item in (assumptions or [])[:3]
+            if item.get("statement")
+        ) or "no assumptions identified"
+        dispute_line = "; ".join(
+            str(item.get("question") or "")
+            for item in (disputes or [])[:3]
+            if item.get("question")
+        ) or "no disputes identified"
+        return (
+            f"Opening thesis: {statement} Drivers on the table: {drivers}. "
+            f"Assumptions to test: {assumption_line}. "
+            f"Disputes that must create cross-questioning, concession, or revision: {dispute_line}."
+        )
+
     def _debate_rounds(
         self,
         pocket: Dict[str, Any],
         causal_context: List[Dict[str, Any]],
         evidence_notes: List[str],
         relationship_topology: List[Dict[str, Any]],
+        disputes: List[Dict[str, Any]] | None = None,
     ) -> List[Dict[str, Any]]:
         turns: List[Dict[str, Any]] = []
         pocket_id = pocket.get("pocket_id")
         label = pocket.get("label")
         pairs = self._select_debate_pairs(causal_context, relationship_topology)
+        disputes = disputes or []
 
         for round_idx, (claimant_ctx, challenger_ctx) in enumerate(pairs, start=1):
+            dispute = disputes[(round_idx - 1) % len(disputes)] if disputes else {}
             claimant = claimant_ctx.get("agent") or {}
             challenger = challenger_ctx.get("agent") or {}
             claimant_sample = claimant_ctx.get("forecast_sample") or {}
@@ -1912,7 +2058,8 @@ class StructuredSimulationRunner:
                 )
                 challenger_sample["confidence"] = self._qualitative_challenge_confidence(challenger)
             contested_target = (
-                claimant_sample.get("target_variable")
+                ((dispute.get("linked_targets") or [None])[0] if dispute else None)
+                or claimant_sample.get("target_variable")
                 or challenger_sample.get("target_variable")
                 or "primary_outcome"
             )
@@ -1934,6 +2081,9 @@ class StructuredSimulationRunner:
                 turn_type="challenge",
                 metadata={
                     "round": round_idx,
+                    "dispute_id": dispute.get("dispute_id"),
+                    "dispute_question": dispute.get("question"),
+                    "linked_assumptions": dispute.get("linked_assumptions") or [],
                     "target_agent_id": claimant.get("agent_id"),
                     "contested_target": contested_target,
                     "claimant_base": claimant_sample.get("base"),
@@ -1956,6 +2106,7 @@ class StructuredSimulationRunner:
                 turn_type="moderator_cross_question",
                 metadata={
                     "round": round_idx,
+                    "dispute_id": dispute.get("dispute_id"),
                     "contested_target": contested_target,
                 },
             ))
@@ -1973,6 +2124,7 @@ class StructuredSimulationRunner:
                 turn_type="research_check",
                 metadata={
                     "round": round_idx,
+                    "dispute_id": dispute.get("dispute_id"),
                     "contested_target": contested_target,
                 },
             ))
@@ -1994,8 +2146,30 @@ class StructuredSimulationRunner:
                 turn_type="rebuttal",
                 metadata={
                     "round": round_idx,
+                    "dispute_id": dispute.get("dispute_id"),
                     "challenger_agent_id": challenger.get("agent_id"),
                     "contested_target": contested_target,
+                },
+            ))
+            turns.append(self._turn(
+                pocket_id,
+                label,
+                claimant.get("agent_id"),
+                claimant.get("name"),
+                self._concession_message(
+                    claimant=claimant,
+                    challenger=challenger,
+                    claimant_sample=claimant_sample,
+                    challenger_sample=challenger_sample,
+                    contested_target=contested_target,
+                    round_idx=round_idx,
+                ),
+                turn_type="concession",
+                metadata={
+                    "round": round_idx,
+                    "dispute_id": dispute.get("dispute_id"),
+                    "contested_target": contested_target,
+                    "linked_assumptions": dispute.get("linked_assumptions") or [],
                 },
             ))
             turns.append(self._turn(
@@ -2014,6 +2188,7 @@ class StructuredSimulationRunner:
                 turn_type="quant_check",
                 metadata={
                     "round": round_idx,
+                    "dispute_id": dispute.get("dispute_id"),
                     "contested_target": contested_target,
                 },
             ))
@@ -2033,6 +2208,7 @@ class StructuredSimulationRunner:
                 turn_type="mediated_revision",
                 metadata={
                     "round": round_idx,
+                    "dispute_id": dispute.get("dispute_id"),
                     "claimant_agent_id": claimant.get("agent_id"),
                     "claimant_agent_name": claimant.get("name"),
                     "challenger_agent_id": challenger.get("agent_id"),
@@ -2382,12 +2558,12 @@ class StructuredSimulationRunner:
         evidence_status = self._evidence_status_line(evidence_notes, contested_target, challenger)
         challenger_claim = self._agent_claim_from_fields(challenger, contested_target)
         return (
-            f"{challenger_name}: {claimant_name}, I challenge `{contested_target} = {claimant_base}`. "
-            f"My counter-read is `{challenger_base}`. {evidence_status} "
-            f"My actual claim is: {challenger_claim}. "
+            f"{challenger_name}: {claimant_name}, I do not buy your mark on `{contested_target}` as stated. "
+            f"You are sitting at `{claimant_base}`; my lane pulls it toward `{challenger_base}`. {evidence_status} "
+            f"My concrete objection is: {challenger_claim}. "
             f"The weak link is {axis}. {fact_basis} "
-            f"Your stress case `{claimant_downside}` still looks too neat; {pressure}. "
-            "Answer one thing: what single assumption would you cut first if my lane is right?"
+            f"Your adverse case `{claimant_downside}` still does not explain the mechanism; {pressure}. "
+            "Answer directly: name the first assumption you would cut if my lane turns out to be right."
         )
 
     def _rebuttal_message(
@@ -2423,12 +2599,49 @@ class StructuredSimulationRunner:
         evidence_status = self._evidence_status_line(evidence_notes, contested_target, claimant)
         claimant_claim = self._agent_claim_from_fields(claimant, contested_target)
         return (
-            f"{claimant_name}: {challenger_name}, I’ll concede partial weight, not the whole case. "
-            f"{evidence_status} I still defend this claim: {claimant_claim}. "
-            f"The part I am defending is {axis}. {fact_basis} "
-            f"Counter-evidence I can cite: {self._short_card(defense, max_len=240)}. "
-            f"I revise from `{claimant_base}` toward `{revised}` for now; if the next pocket cannot prove the mechanism, the revision should decay."
+            f"{claimant_name}: {challenger_name}, that lands partly, but not all the way. "
+            f"{evidence_status} I still defend this: {claimant_claim}. "
+            f"The piece I am protecting is {axis}. {fact_basis} "
+            f"My best counter-card is: {self._short_card(defense, max_len=240)}. "
+            f"So I revise from `{claimant_base}` toward `{revised}` for now. If the next pocket cannot prove the mechanism, pull that revision back."
         )
+
+    def _concession_message(
+        self,
+        claimant: Dict[str, Any],
+        challenger: Dict[str, Any],
+        claimant_sample: Dict[str, Any],
+        challenger_sample: Dict[str, Any],
+        contested_target: str,
+        round_idx: int,
+    ) -> str:
+        claimant_name = claimant.get("name") or "Claimant"
+        challenger_name = challenger.get("name") or "challenger"
+        claimant_base = claimant_sample.get("base")
+        challenger_base = challenger_sample.get("base")
+        spread = self._numeric_spread(claimant_base, challenger_base)
+        concession = self._concession_line(claimant, challenger, contested_target)
+        revision = self._provisional_revision(claimant_base, challenger_base, round_idx)
+        return (
+            f"{claimant_name}: I concede this part to {challenger_name}: {concession}. "
+            f"The gap is still `{spread}` on `{contested_target}`, so I am not abandoning my view, "
+            f"but I accept a provisional move from `{claimant_base}` toward `{revision}` if the evidence check holds."
+        )
+
+    def _concession_line(self, claimant: Dict[str, Any], challenger: Dict[str, Any], target: str) -> str:
+        challenger_role = f"{challenger.get('name', '')} {challenger.get('role', '')}".lower()
+        claimant_role = f"{claimant.get('name', '')} {claimant.get('role', '')}".lower()
+        if any(term in challenger_role for term in ["auditor", "watchdog", "research", "data"]):
+            return "my claim needs a cleaner source chain, date, unit, or denominator before it deserves full weight"
+        if any(term in challenger_role for term in ["quant", "poll", "model", "scientist"]):
+            return "the uncertainty band is wider than my first point estimate implied"
+        if any(term in challenger_role for term in ["voter", "worker", "consumer", "civilian", "household", "community"]):
+            return "the lived-response channel may change behavior before it shows up in aggregate data"
+        if any(term in challenger_role for term in ["strategist", "military", "security", "diplomat", "trader", "market"]):
+            return "incentives, signaling, and second-order reactions may matter more than the headline evidence"
+        if "same" in claimant_role:
+            return f"my lane may be overweighting its own view of {self._target_label(target)}"
+        return "there is a plausible mechanism in your lane that my first answer underweighted"
 
     def _background_claim(self, agent: Dict[str, Any]) -> str:
         persona = agent.get("persona") if isinstance(agent.get("persona"), dict) else {}
@@ -2827,6 +3040,8 @@ class StructuredSimulationRunner:
             if self._looks_like_section_heading(cleaned):
                 current_section = cleaned[:80]
                 continue
+            if self._is_instruction_section(current_section):
+                continue
             has_signal = bool(re.search(
                 r"\d|turnout|vote|seat|risk|advantage|poll|scenario|baseline|current|region|price|rate|share|probability|"
                 r"agent|voter|consumer|worker|household|campaign|alliance|policy|jobs|corruption|welfare|identity|supply|demand|"
@@ -2841,6 +3056,13 @@ class StructuredSimulationRunner:
                 break
         return notes or ["The prompt provides the active evidence set; no external research packet was attached to this structured run."]
 
+    def _is_instruction_section(self, section: str) -> bool:
+        lowered = str(section or "").lower()
+        return bool(re.search(
+            r"\b(core question|time[- ]?pocket|simulation plan|required output|final prompt|rules?|target variables?|agent architecture)\b",
+            lowered,
+        ))
+
     def _is_meta_instruction_note(self, cleaned: str) -> bool:
         """Filter workflow instructions out of factual evidence cards."""
         lowered = cleaned.lower()
@@ -2850,6 +3072,16 @@ class StructuredSimulationRunner:
         ):
             return True
         if re.match(r"^(?:time[- ]pocket\s*)?pocket\s+\d+\s*:", lowered):
+            return True
+        if re.match(r"^\d{1,2}\.\s*(?:days?\s+\d|current state|scenario synthesis|baseline|pre[- ]campaign|candidate|alliance|manifesto|final campaign|voting)\b", lowered):
+            return True
+        if re.match(r"^\d{1,2}\.\s+.+\?$", lowered):
+            return True
+        if re.search(r"\bit is not a\b.*\bsimulation\b", lowered):
+            return True
+        if re.match(r"^this is a .+\bsimulation\b", lowered):
+            return True
+        if re.search(r"\bdo not use\b.*\b(?:twitter|reddit|platform|logic|future|actual|invented)\b", lowered):
             return True
         if re.match(r"^(rules?|required outputs?|final prompt|task|your task|for every agent|each agent|agents must|agents should)\b", lowered):
             return True
@@ -2947,6 +3179,7 @@ class StructuredSimulationRunner:
             if self._is_bad_evidence_card(cleaned):
                 continue
             has_number = bool(re.search(r"\d", cleaned))
+            has_real_number = self._has_real_numeric_measure(cleaned)
             has_context = bool(re.search(
                 r"seat|vote|share|turnout|probability|index|poll|assembly|lok sabha|majority|phase|scenario|range|percent|%|"
                 r"price|pricing|cost|usd|dollar|kwh|mwh|gwh|twh|ton|tonne|metric|lithium|spodumene|carbonate|"
@@ -2955,7 +3188,7 @@ class StructuredSimulationRunner:
                 cleaned,
                 re.IGNORECASE,
             ))
-            if has_number and has_context:
+            if has_number and has_real_number and has_context:
                 anchors.append(cleaned[:260])
             if len(anchors) >= 120:
                 break
@@ -3036,43 +3269,77 @@ class StructuredSimulationRunner:
         role = str(agent.get("role") or agent.get("name") or "Agent")
         role_l = role.lower()
         target = forecast_sample.get("target_variable") or (domain_plan.get("target_variables") or [{"name": "primary_outcome"}])[0].get("name")
+        target_label = self._target_label(target)
         base = forecast_sample.get("base")
         downside = forecast_sample.get("downside")
         confidence = forecast_sample.get("confidence")
         owns_numbers = (agent.get("numeric_capabilities") or {}).get("must_output_numbers", True)
         persona = agent.get("persona") if isinstance(agent.get("persona"), dict) else {}
-        cognitive = agent.get("cognitive_profile") if isinstance(agent.get("cognitive_profile"), dict) else {}
         stakes = agent.get("stakes_profile") if isinstance(agent.get("stakes_profile"), dict) else {}
-        evidence = self._select_role_evidence(role_l, evidence_notes, target=target, pocket_label=pocket.get("label") or "")
         disagreement = self._disagreement_claim(role_l)
-        fact_basis = self._fact_basis(role_l, evidence_notes, disagreement, target=target, pocket_label=pocket.get("label") or "")
         claim = self._agent_claim_from_fields(agent, target)
         signal = self._agent_observable_signal(agent)
         falsifier = self._agent_falsifier(agent, target)
-        concern = self._clean_agent_field(persona.get("private_concern")) or self._clean_agent_field((agent.get("blind_spots") or [""])[0]) or "the model may be smoothing over a real disagreement"
-        tension = self._clean_agent_field(persona.get("default_tension")) or self._clean_agent_field((agent.get("biases") or [""])[0]) or "one clean story may hide the actual mechanism"
+        concern = (
+            self._clean_agent_field(persona.get("private_concern"))
+            or self._clean_agent_field((agent.get("blind_spots") or [""])[0])
+            or "the room may be overconfident where the evidence is thin"
+        )
+        tension = (
+            self._clean_agent_field(persona.get("default_tension"))
+            or self._clean_agent_field((agent.get("biases") or [""])[0])
+            or "a clean aggregate story may be hiding a messy local mechanism"
+        )
         stakes_line = self._human_stakes_line(stakes)
         evidence_status = self._evidence_status_line(evidence_notes, target, agent)
         character = persona.get("character_name") or agent.get("name")
-        fact_short = self._human_fact_basis(role_l, evidence_notes, disagreement, target=target, pocket_label=pocket.get("label") or "")
-        evidence_short = self._short_card(evidence, max_len=180)
-        pointer = fact_short if fact_short else evidence_short
-        if not pointer:
-            pointer = "I do not have a clean source card for this lane yet"
-        lens = self._role_lens(role_l)
-        numeric_sentence = (
-            f"My number for `{target}` is base `{base}`, downside `{downside}`, confidence `{confidence}`."
-            if owns_numbers and base is not None else
-            f"I am not setting the `{target}` number; I am changing the pressure around behavior, incentives, trust, constraints, or timing."
-        )
+        pointer = self._human_fact_basis(
+            role_l,
+            evidence_notes,
+            disagreement,
+            target=target,
+            pocket_label=pocket.get("label") or "",
+        ) or "I do not have a clean source card for this lane yet"
+        lens = self._role_lens(role_l, target_label)
+        numeric_sentence = self._forecast_sentence(owns_numbers, target_label, base, downside, confidence)
+        pushback = self._plain_disagreement(disagreement)
+        claim = self._trim_mechanical_claim(claim, target_label)
+        signal = self._trim_mechanical_claim(signal, target_label)
         return (
-            f"{character}: My read is simple: {claim}. {lens} "
-            f"The evidence I can use is {pointer}. {evidence_status} "
-            f"What I can personally observe is {signal}. "
-            f"{numeric_sentence} "
-            f"I am pushing back on this: {disagreement} "
-            f"Change my mind with {falsifier}. "
-            f"{stakes_line} My worry is {concern}. The tension I am carrying is {tension}."
+            f"{character}: {lens} My claim on {target_label} is: {claim}. "
+            f"The strongest card in my lane is {pointer}. {evidence_status} "
+            f"What I can actually see from my seat is {signal}. {numeric_sentence} "
+            f"I am pushing back on {pushback}. Change my mind with {falsifier}. "
+            f"{stakes_line} My private worry is {concern}; the tension I am not letting the room smooth over is {tension}."
+        )
+
+    def _target_label(self, target: Any) -> str:
+        text = str(target or "the outcome").replace("_", " ").replace("-", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or "the outcome"
+
+    def _forecast_sentence(self, owns_numbers: bool, target_label: str, base: Any, downside: Any, confidence: Any) -> str:
+        if owns_numbers and base is not None:
+            return (
+                f"My current mark is {target_label}: base {base}, stress {downside}, confidence {confidence}. "
+                "I am treating that as a revisable mark, not a prophecy."
+            )
+        return (
+            f"I am not issuing a precise number for {target_label}; I am moving the assumptions around behavior, "
+            "constraints, incentives, timing, and second-order reactions."
+        )
+
+    def _plain_disagreement(self, disagreement: str) -> str:
+        text = re.sub(r"^I disagree with\s+", "", str(disagreement or ""), flags=re.IGNORECASE)
+        return text[:1].lower() + text[1:] if text else "the single-cause explanation"
+
+    def _trim_mechanical_claim(self, claim: str, target_label: str) -> str:
+        cleaned = self._clean_agent_field(claim, max_len=260)
+        if cleaned:
+            return cleaned
+        return (
+            f"my lane can move {target_label}, but this profile did not provide enough concrete detail, "
+            "so my claim should carry low weight until challenged"
         )
 
     def _human_style_line(self, cognitive: Dict[str, Any]) -> str:
@@ -3131,6 +3398,11 @@ class StructuredSimulationRunner:
             "turn a messy debate",
             "expand the evidence frontier",
             "track which claims become salient",
+            "route to victory",
+            "campaign room where turnout",
+            "booth reports",
+            "seat math",
+            "the practical world of",
             "evidence_strength",
             "actor_alignment",
             "uncertainty_pressure",
@@ -3144,6 +3416,8 @@ class StructuredSimulationRunner:
     def _agent_claim_from_fields(self, agent: Dict[str, Any], target: str) -> str:
         """Build a claim from actual agent fields without inventing facts."""
         persona = agent.get("persona") if isinstance(agent.get("persona"), dict) else {}
+        role_l = f"{agent.get('name', '')} {agent.get('role', '')} {agent.get('archetype', '')}".lower()
+        role_specific = self._role_specific_claim(role_l, target)
         candidates: List[Any] = [
             persona.get("opening_position"),
             persona.get("objective"),
@@ -3158,11 +3432,78 @@ class StructuredSimulationRunner:
         for candidate in candidates:
             cleaned = self._clean_agent_field(candidate)
             if cleaned:
+                if role_specific and self._is_generic_role_claim(cleaned, role_l):
+                    return role_specific
                 return cleaned
+        if role_specific:
+            return role_specific
         return (
             f"No concrete role-specific claim was supplied for `{target}`; "
             "treat this speaker as a weak pressure lane until better evidence/profile detail is provided."
         )
+
+    def _is_generic_role_claim(self, claim: str, role_l: str) -> bool:
+        lowered = str(claim or "").lower()
+        role_tokens = {
+            token for token in re.findall(r"[a-z][a-z0-9]{3,}", role_l)
+            if token not in {"agent", "analyst", "observer", "strategist", "model", "public", "facing"}
+        }
+        return (
+            "state what" in lowered
+            or "can observe, what it can influence" in lowered
+            or "separate visible signaling from actual escalation incentives" in lowered
+            or "role-specific incentives" in lowered
+            or (len(role_tokens) > 0 and sum(1 for token in role_tokens if token in lowered) == 0 and len(lowered) < 120)
+        )
+
+    def _role_specific_claim(self, role_l: str, target: str) -> str:
+        target_label = self._target_label(target)
+        if "nuclear" in role_l or "non-proliferation" in role_l or "nonproliferation" in role_l:
+            return (
+                f"{target_label} hinges on whether inspection, enrichment limits, and breakout-risk language can be made credible "
+                "enough for both sides to accept without looking like they surrendered."
+            )
+        if "domestic political" in role_l or ("political adviser" in role_l and "domestic" in role_l):
+            return (
+                f"{target_label} is constrained by audience cost: leaders may prefer a tense pause over escalation if oil prices, casualties, "
+                "or war-fatigue become politically expensive at home."
+            )
+        if "pentagon" in role_l or "centcom" in role_l or "force-protection" in role_l or "force protection" in role_l:
+            return (
+                f"{target_label} moves when force-protection posture changes: evacuations, naval spacing, air-defense alerts, "
+                "or rules-of-engagement shifts matter more than public rhetoric."
+            )
+        if "irgc" in role_l or "iranian security hardliner" in role_l:
+            return (
+                f"{target_label} depends on the regime's credibility calculus: it can use proxies, maritime pressure, or calibrated retaliation "
+                "to show pain without necessarily choosing open war."
+            )
+        if "israeli security" in role_l:
+            return (
+                f"{target_label} depends on whether Israel believes the pause lets Iran rebuild military or nuclear leverage; "
+                "that perception can lower tolerance for waiting."
+            )
+        if "diplomat" in role_l or "negotiator" in role_l or "mediator" in role_l:
+            return (
+                f"{target_label} improves only if the parties can sell a face-saving off-ramp to domestic and allied audiences, "
+                "not merely if a technical bargain exists."
+            )
+        if any(term in role_l for term in ["shipping", "insur", "tanker", "port", "logistics", "lng", "oil", "energy"]):
+            return (
+                f"{target_label} should be read through commercial behavior: insurance premia, AIS usage, waiting times, rerouting, "
+                "and cargo nominations reveal stress before official statements do."
+            )
+        if "cyber" in role_l:
+            return (
+                f"{target_label} can rise through deniable disruption: ports, banks, energy systems, and communications are attractive pressure points "
+                "when open retaliation is too costly."
+            )
+        if any(term in role_l for term in ["civilian", "humanitarian", "medicine", "diaspora", "resident", "household"]):
+            return (
+                f"{target_label} is not only a state decision; shortages, fear, payment friction, medicine access, and family-level adaptation "
+                "change the political room leaders have."
+            )
+        return ""
 
     def _agent_observable_signal(self, agent: Dict[str, Any]) -> str:
         """State what the agent can observe, based only on its profile fields."""
@@ -3220,6 +3561,10 @@ class StructuredSimulationRunner:
             return "proof that affected people are absorbing the shock without changing behavior"
         if any(term in role_l for term in ["operator", "utility", "grid", "miner", "producer", "supplier", "developer"]):
             return "a credible operational workaround that changes capacity, timing, or bottleneck severity"
+        if any(term in role_l for term in ["security", "military", "pentagon", "centcom", "irgc", "hardliner", "diplomat", "negotiator"]):
+            return "a visible change in red lines, force posture, back-channel terms, or third-party pressure"
+        if any(term in role_l for term in ["oil", "lng", "shipping", "insurance", "port", "logistics"]):
+            return "a change in cargo flows, insurance pricing, tanker routing, port throughput, or spare capacity"
         if any(term in role_l for term in ["trader", "strategist", "executive", "party", "campaign"]):
             return "evidence that the payoff structure changed, not just the public narrative"
         if any(term in role_l for term in ["auditor", "watchdog", "moderator", "mediator"]):
@@ -3246,22 +3591,31 @@ class StructuredSimulationRunner:
             return "the prompt is thin for my lane, so this should stay low-confidence"
         return " / ".join(self._short_card(fact, max_len=150) for fact in facts)
 
-    def _role_lens(self, role_l: str) -> str:
-        if any(term in role_l for term in ["strategist", "campaign", "party"]):
-            return "I care about how organization, message discipline, and opponent mistakes convert into outcomes."
+    def _role_lens(self, role_l: str, target_label: str = "the outcome") -> str:
+        if any(term in role_l for term in ["security", "military", "pentagon", "centcom", "irgc", "hardliner", "planner", "strategist"]):
+            return (
+                "I am treating this as a decision problem, not a press release: who needs to look strong, "
+                "who can absorb pain, and where a small move can become escalation."
+            )
+        if any(term in role_l for term in ["campaign", "party"]):
+            return "I care about organization, field execution, message control, counter-moves, and conversion into the final outcome."
+        if any(term in role_l for term in ["diplomat", "negotiator", "mediator", "alliance"]):
+            return "I am watching face-saving exits, veto players, bargaining leverage, and where public positions differ from private room for a deal."
+        if any(term in role_l for term in ["oil", "lng", "shipping", "port", "logistics", "insurance", "underwriter", "trader", "market"]):
+            return "I am watching bottlenecks, premiums, cargo timing, hedging behavior, and whether fear becomes a real price or supply shock."
         if any(term in role_l for term in ["voter", "beneficiary", "rural", "urban", "worker", "youth", "poor", "middle"]):
             return "I care about lived incentives, turnout motivation, local trust, and whether promises feel credible."
         if any(term in role_l for term in ["pollster", "scientist", "quant", "data"]):
-            return "I care about sample bias, historical baselines, regional heterogeneity, and uncertainty bands."
+            return "I care about denominators, base rates, missing data, sensitivity, and whether the forecast is pretending to be cleaner than it is."
         if any(term in role_l for term in ["journalist", "media", "narrative"]):
-            return "I care about which story voters hear repeatedly and which scandal or promise becomes salient."
+            return "I care about which story gets repeated, what people ignore, and whether attention changes behavior before facts fully settle."
         if any(term in role_l for term in ["watchdog", "auditor", "governance"]):
             return "I care about evidence quality, institutional credibility, and claims that may be overstated."
         if any(term in role_l for term in ["business", "industry"]):
             return "I care about jobs, investment, business sentiment, and whether economic promises are believable."
-        if any(term in role_l for term in ["mediator", "negotiator", "alliance"]):
-            return "I care about bargaining power, vote transfer, fragmentation, and whether allies actually coordinate."
-        return "I care about the causal channel assigned to my role and whether it changes the forecast."
+        if any(term in role_l for term in ["witness", "civilian", "humanitarian", "patient", "resident", "expatriate"]):
+            return "I am closest to the human consequences: shortages, fear, workarounds, trust, fatigue, and what people do when institutions lag."
+        return f"I am testing one concrete path into {target_label}, and I will not let the room treat it as decorative context."
 
     def _select_role_evidence(self, role_l: str, evidence_notes: List[str], target: str = "", pocket_label: str = "") -> str:
         wanted = [
@@ -3283,6 +3637,10 @@ class StructuredSimulationRunner:
         return " | ".join(selected) if selected else "the provided prompt evidence"
 
     def _disagreement_claim(self, role_l: str) -> str:
+        if any(term in role_l for term in ["security", "military", "pentagon", "centcom", "irgc", "hardliner", "diplomat", "negotiator"]):
+            return "I disagree with treating public signaling as sincere probability; actors may posture, bluff, or search for off-ramps at the same time."
+        if any(term in role_l for term in ["oil", "lng", "shipping", "insurance", "port", "logistics", "trader", "market"]):
+            return "I disagree with treating geopolitical risk as just a headline; it becomes real only through cargo flows, premiums, routing, inventory, and timing."
         if any(term in role_l for term in ["pollster", "scientist", "quant", "data"]):
             return "I disagree with collapsing uncertainty into one clean number; the forecast needs distributions and sensitivity."
         if any(term in role_l for term in ["watchdog", "auditor", "governance"]):

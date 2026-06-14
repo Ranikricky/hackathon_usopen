@@ -16,3 +16,12 @@ export const generateStructuredOutput = (data) => {
 export const getStructuredOutput = (simulationId, outputType) => {
   return service.get(`/api/outputs/${simulationId}/${outputType}`)
 }
+
+/**
+ * Ask a read-only question against saved structured simulation state.
+ * This endpoint is deterministic and does not invent new forecasts.
+ * @param {Object} data - { simulation_id, question }
+ */
+export const askStructuredState = (data) => {
+  return requestWithRetry(() => service.post('/api/outputs/ask', data), 2, 1000)
+}

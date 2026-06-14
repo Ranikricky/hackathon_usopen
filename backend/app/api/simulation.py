@@ -16,18 +16,21 @@ from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
-from ..services.domain_simulation_planner import DomainSimulationPlanner
+from ..services.domain_simulation_planner import DomainSimulationPlanner, LLMUnavailableError
 from ..services.agent_generation_engine import AgentGenerationEngine
 from ..services.external_research import ExternalResearchService
 from ..services.numeric_validation import NumericValidationService
 from ..services.structured_simulation_runner import StructuredSimulationRunner
 from ..services.domain_contract import (
     SOCIAL_DISCOURSE_ENGINE,
+    STRUCTURED_ENGINE,
     build_domain_contract,
     domain_plan_from_contract,
+    normalize_engine_mode,
 )
 from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
+from ..utils.llm_client import LLMClient
 from ..models.project import ProjectManager
 from ..models.simulation_state import SimulationStateManager
 
@@ -37,6 +40,43 @@ logger = get_logger('horizonxl.api.simulation')
 # Interview prompt 优化前缀
 # 添加此前缀可以避免Agent调用工具，直接用文本回复
 INTERVIEW_PROMPT_PREFIX = "结合你的人设、所有的过往记忆与行动，不调用任何工具直接用文本回复我："
+
+
+@simulation_bp.route('/llm-health', methods=['GET'])
+def llm_health():
+    """Return non-secret LLM connectivity diagnostics."""
+    payload = {
+        "base_url": Config.LLM_BASE_URL,
+        "model": Config.LLM_MODEL_NAME,
+        "api_key_present": bool(Config.LLM_API_KEY),
+        "curl_fallback_enabled": bool(Config.LLM_CURL_FALLBACK_ENABLED),
+    }
+    if not Config.LLM_API_KEY:
+        return jsonify({"success": False, "data": payload, "error": "LLM_API_KEY is not configured"}), 503
+    try:
+        client = LLMClient(timeout=8)
+        response = client.chat([
+            {"role": "system", "content": "Reply with exactly: ok"},
+            {"role": "user", "content": "health check"},
+        ], temperature=0.1, max_tokens=8)
+        payload["response_preview"] = response[:40]
+        return jsonify({"success": True, "data": payload})
+    except Exception as exc:
+        return jsonify({"success": False, "data": payload, "error": str(exc)}), 503
+
+
+def _llm_unavailable_response(exc: Exception):
+    return jsonify({
+        "success": False,
+        "error": "LLM provider is required for this workflow but is unavailable.",
+        "detail": str(exc),
+        "fix": "Check LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_NAME, provider subscription/credits, and backend outbound network access. Use /api/simulation/llm-health for diagnostics.",
+        "llm": {
+            "base_url": Config.LLM_BASE_URL,
+            "model": Config.LLM_MODEL_NAME,
+            "api_key_present": bool(Config.LLM_API_KEY),
+        },
+    }), 503
 
 
 def _humanize_transcript_label(value: str) -> str:
@@ -549,6 +589,8 @@ def plan_simulation():
                 "query_count": len(research_packet.get("queries", [])) if isinstance(research_packet, dict) else 0,
             }
         })
+    except LLMUnavailableError as e:
+        return _llm_unavailable_response(e)
     except Exception as e:
         logger.error(f"Failed to plan simulation: {str(e)}")
         return jsonify({
@@ -603,6 +645,8 @@ def generate_structured_agents():
                 "agents": agents
             }
         })
+    except LLMUnavailableError as e:
+        return _llm_unavailable_response(e)
     except Exception as e:
         logger.error(f"Failed to generate structured agents: {str(e)}")
         return jsonify({
@@ -779,6 +823,26 @@ def run_structured_simulation():
             run_project_id = legacy_state.project_id
             run_graph_id = legacy_state.graph_id
 
+        if contract:
+            # Launching the structured runner from a persisted project means the
+            # Domain Contract has already become the handoff artifact for this
+            # run. Some older frontend calls created the plan with
+            # approved=false and then proceeded, which caused validation to
+            # fail after an otherwise successful simulation.
+            contract = dict(contract)
+            contract["approved"] = True
+            contract["status"] = "approved"
+            if isinstance(contract.get("domain_plan"), dict):
+                contract["domain_plan"] = dict(contract["domain_plan"])
+                contract["domain_plan"]["domain_contract"] = {
+                    **(contract["domain_plan"].get("domain_contract") or {}),
+                    "approved": True,
+                    "engine_mode": contract.get("engine_mode"),
+                    "report_template": contract.get("report_template"),
+                }
+            if project_id:
+                ProjectManager.save_domain_contract(project_id, contract)
+
         domain_plan = domain_plan_from_contract(contract, data.get('domain_plan')) if contract else (data.get('domain_plan') or DomainSimulationPlanner().plan(
             user_question=prompt or (project.simulation_requirement if project else ''),
             document_text=document_text,
@@ -817,6 +881,21 @@ def run_structured_simulation():
         )
 
         validation = structured_state.validation or NumericValidationService().validate(structured_state.to_dict())
+        readiness = structured_state.debate_readiness or (structured_state.aggregated_outputs or {}).get("debate_readiness") or {}
+        if readiness and readiness.get("ready") is False:
+            return jsonify({
+                "success": False,
+                "error": "Debate readiness failed",
+                "data": {
+                    "simulation_id": simulation_id,
+                    "project_id": run_project_id,
+                    "graph_id": run_graph_id,
+                    "domain": domain_plan.get("domain"),
+                    "readiness": readiness,
+                    "validation": validation,
+                    "structured_state_path": "structured_state.json",
+                }
+            }), 409
         return jsonify({
             "success": True,
             "data": {
@@ -824,6 +903,7 @@ def run_structured_simulation():
                 "project_id": run_project_id,
                 "graph_id": run_graph_id,
                 "domain": domain_plan.get("domain"),
+                "readiness": readiness,
                 "agent_count": len(structured_state.agents),
                 "time_pocket_count": len(structured_state.time_pockets),
                 "target_variable_count": len(domain_plan.get("target_variables") or []),
@@ -832,6 +912,8 @@ def run_structured_simulation():
                 "structured_state_path": "structured_state.json",
             }
         })
+    except LLMUnavailableError as e:
+        return _llm_unavailable_response(e)
     except Exception as e:
         logger.error(f"Failed to run structured simulation: {str(e)}")
         return jsonify({
@@ -894,7 +976,7 @@ def create_simulation():
             }), 400
         
         contract = ProjectManager.get_domain_contract(project_id) or {}
-        engine_mode = contract.get("engine_mode") or "structured_simulation"
+        engine_mode = normalize_engine_mode(contract.get("engine_mode") or STRUCTURED_ENGINE)
         use_social_discourse = engine_mode == SOCIAL_DISCOURSE_ENGINE
 
         manager = SimulationManager()
@@ -2230,7 +2312,7 @@ def start_simulation():
 
         project = ProjectManager.get_project(state.project_id)
         contract = ProjectManager.get_domain_contract(state.project_id) if project else None
-        engine_mode = (contract or {}).get("engine_mode") or "structured_simulation"
+        engine_mode = normalize_engine_mode((contract or {}).get("engine_mode") or STRUCTURED_ENGINE)
         if engine_mode != SOCIAL_DISCOURSE_ENGINE:
             prompt = project.simulation_requirement if project else ""
             document_text = ProjectManager.get_extracted_text(state.project_id) or ""

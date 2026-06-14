@@ -4,9 +4,12 @@ Uses the OpenAI-compatible chat API.
 """
 
 import json
+import os
 import re
+import subprocess
+import tempfile
 from typing import Optional, Dict, Any, List
-from openai import OpenAI
+from openai import APIConnectionError, OpenAI
 
 from ..config import Config
 
@@ -24,6 +27,7 @@ class LLMClient:
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL_NAME
+        self.timeout = timeout or Config.LLM_TIMEOUT_SECONDS
         
         if not self.api_key:
             raise ValueError("LLM_API_KEY is not configured")
@@ -31,7 +35,7 @@ class LLMClient:
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
-            timeout=timeout or Config.LLM_TIMEOUT_SECONDS,
+            timeout=self.timeout,
         )
 
     def _normalize_temperature(self, temperature: float) -> float:
@@ -74,11 +78,67 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
-        response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+            content = response.choices[0].message.content
+        except APIConnectionError:
+            if not Config.LLM_CURL_FALLBACK_ENABLED:
+                raise
+            content = self._chat_via_curl(kwargs)
         # Some models include chain-of-thought style <think> blocks in content.
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         return content
+
+    def _chat_via_curl(self, payload: Dict[str, Any]) -> str:
+        """Fallback for local environments where Python DNS/httpx is blocked.
+
+        The API remains OpenAI-compatible; this only changes the transport. It
+        is intentionally used after SDK connection failures, not as the primary
+        path, so production behavior stays normal when Python networking works.
+        """
+        endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
+        body = json.dumps(payload)
+        config_text = "\n".join([
+            "silent",
+            "show-error",
+            f"max-time = {max(1, int(self.timeout))}",
+            f"url = \"{endpoint}\"",
+            "request = POST",
+            "header = \"Content-Type: application/json\"",
+            f"header = \"Authorization: Bearer {self.api_key}\"",
+            f"data = {json.dumps(body)}",
+            "",
+        ])
+        config_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", delete=False, prefix="hxl_curl_", suffix=".conf") as handle:
+                config_path = handle.name
+                handle.write(config_text)
+            os.chmod(config_path, 0o600)
+            result = subprocess.run(
+                ["curl", "--config", config_path],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=self.timeout + 5,
+            )
+        finally:
+            if config_path:
+                try:
+                    os.remove(config_path)
+                except OSError:
+                    pass
+
+        if result.returncode != 0:
+            raise RuntimeError(f"LLM curl fallback failed: {result.stderr.strip() or result.stdout.strip()}")
+
+        try:
+            parsed = json.loads(result.stdout)
+            if "error" in parsed:
+                raise RuntimeError(f"LLM provider error: {parsed['error']}")
+            return parsed["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"LLM curl fallback returned unexpected response: {result.stdout[:500]}") from exc
     
     def chat_json(
         self,

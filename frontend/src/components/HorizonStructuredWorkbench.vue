@@ -3,16 +3,31 @@
     <div class="workbench-hero">
       <div>
         <span class="eyebrow">Horizon XL Dispatch</span>
-        <h2>Simulation desk</h2>
+        <h2>Forecast desk</h2>
         <p>
-          A structured editorial workflow: plan the domain, convene agents,
-          run the debate, validate the numbers, then publish outputs.
+          Domain contract, evidence, agent society, debate readiness, forecast
+          ledger, then a publishable report. Raw transcripts stay in the audit drawer.
         </p>
       </div>
       <div class="status-chip" :class="validation?.passed ? 'passed' : 'pending'">
         {{ validation?.passed ? 'Validation passed' : activeStageLabel }}
       </div>
     </div>
+
+    <section v-if="forecastThesis || disputes.length || assumptions.length" class="thesis-strip">
+      <div>
+        <span class="eyebrow">Current thesis</span>
+        <h3>{{ forecastThesis?.statement || 'Thesis will appear after the structured run.' }}</h3>
+        <p v-if="forecastThesis?.core_drivers?.length">
+          Drivers: {{ forecastThesis.core_drivers.slice(0, 4).join(' · ') }}
+        </p>
+      </div>
+      <div class="thesis-metrics">
+        <span>{{ assumptions.length }} assumptions</span>
+        <span>{{ disputes.length }} disputes</span>
+        <span>{{ readinessLabel }}</span>
+      </div>
+    </section>
 
     <div v-if="error" class="error-panel">
       <strong>Workbench stopped</strong>
@@ -23,10 +38,10 @@
       <section class="stage-card" :class="{ active: activeStage === 'plan', done: domainPlan }">
         <div class="stage-head">
           <span>01</span>
-          <strong>Domain Plan</strong>
+          <strong>Domain Contract</strong>
         </div>
         <p class="stage-desc">
-          Detect the domain, target variables, horizon, scenarios, and required evidence.
+          Separate evidence, instructions, targets, actors, horizon, scenarios, and engine mode before graph build.
         </p>
         <div class="stage-action">
           <button class="primary-btn" :disabled="busy" @click="createPlan">
@@ -38,6 +53,10 @@
           <div class="kv">
             <span>Domain</span>
             <strong>{{ domainPlan.domain }}</strong>
+          </div>
+          <div class="kv">
+            <span>Engine</span>
+            <strong>{{ domainPlan.engine_mode || domainPlan.domain_contract?.engine_mode || 'structured_forecast' }}</strong>
           </div>
           <div class="kv">
             <span>Horizon</span>
@@ -58,10 +77,10 @@
       <section class="stage-card" :class="{ active: activeStage === 'agents', done: agents.length }">
         <div class="stage-head">
           <span>02</span>
-          <strong>Agent Lab</strong>
+          <strong>Agent Society</strong>
         </div>
         <p class="stage-desc">
-          Generate causal agents, orchestration roles, research roles, and numeric responsibilities.
+          Generate causal actors, ground-truth participants, research/data roles, moderator, mediator, and quant roles.
         </p>
         <div class="stage-action">
           <button class="primary-btn" :disabled="busy || !domainPlan" @click="createAgents">
@@ -84,10 +103,10 @@
       <section class="stage-card" :class="{ active: activeStage === 'run', done: simulationId }">
         <div class="stage-head">
           <span>03</span>
-          <strong>Structured Run</strong>
+          <strong>Debate Readiness</strong>
         </div>
         <p class="stage-desc">
-          Run time pockets, agent arguments, mediated revisions, scenario outputs, and validation.
+          Build thesis, assumptions, disputes, then run time-pocket debate only if the setup is coherent.
         </p>
         <div class="stage-action">
           <button class="primary-btn" :disabled="busy || !domainPlan || !agents.length" @click="runStructured">
@@ -108,16 +127,23 @@
             <span>Debate turns</span>
             <strong>{{ state?.discussion_transcript?.length || 0 }}</strong>
           </div>
+          <div class="kv">
+            <span>Readiness</span>
+            <strong>{{ readinessLabel }}</strong>
+          </div>
+          <ul v-if="readinessIssues.length" class="issue-list">
+            <li v-for="issue in readinessIssues.slice(0, 4)" :key="issue">{{ issue }}</li>
+          </ul>
         </div>
       </section>
 
       <section class="stage-card" :class="{ active: activeStage === 'validation', done: validation?.passed }">
         <div class="stage-head">
           <span>04</span>
-          <strong>Validation</strong>
+          <strong>Forecast Ledger</strong>
         </div>
         <p class="stage-desc">
-          Check numeric completeness before any report can become polished prose.
+          Validate the cleaned forecast ledger before any report can become polished prose.
         </p>
         <div class="stage-action">
           <button class="primary-btn" :disabled="busy || !simulationId" @click="refreshState">
@@ -131,6 +157,11 @@
           <ul v-if="validation.errors?.length">
             <li v-for="item in validation.errors.slice(0, 5)" :key="item">{{ item }}</li>
           </ul>
+        </div>
+        <div v-if="ledgerRows.length" class="mini-list ledger-list">
+          <span v-for="row in ledgerRows.slice(0, 6)" :key="row.target_name || row.target_id" class="pill">
+            {{ row.target_name || row.target_id }} · {{ row.confidence || row.validation_status || 'tracked' }}
+          </span>
         </div>
       </section>
     </div>
@@ -244,7 +275,71 @@
 
         <article v-if="adapterOutput" class="adapter-output">{{ adapterOutput }}</article>
       </section>
+
+      <section class="output-card ask-state-card">
+        <div class="output-head">
+          <div>
+            <span class="eyebrow">Ask State</span>
+            <h3>Question the saved simulation</h3>
+          </div>
+          <span class="state-source-chip">read-only</span>
+        </div>
+        <p class="empty compact-copy">
+          Ask about the bottom line, forecast numbers, assumptions, evidence, or agent disagreement.
+          Answers come from the structured state, not a new freeform report.
+        </p>
+        <div class="ask-state-form">
+          <input
+            v-model="askQuestion"
+            :disabled="busy || !simulationId"
+            type="text"
+            placeholder="Example: what is the bottom line and what evidence drove it?"
+            @keyup.enter="askState"
+          />
+          <button class="secondary-btn" :disabled="busy || !simulationId || !askQuestion.trim()" @click="askState">
+            Ask
+          </button>
+        </div>
+        <article v-if="askAnswer" class="ask-answer">
+          <div v-html="renderMarkdown(askAnswer)"></div>
+          <table v-if="askFacts.length" class="forecast-table ask-facts-table">
+            <thead>
+              <tr>
+                <th>Saved item</th>
+                <th>Value</th>
+                <th>Unit</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="fact in askFacts" :key="`${fact.label}-${fact.value}-${fact.status}`">
+                <td>{{ fact.label }}</td>
+                <td>{{ fact.value ?? '—' }}</td>
+                <td>{{ fact.unit || '—' }}</td>
+                <td>{{ fact.status || fact.confidence || fact.date || 'saved' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="askSources.length" class="source-row">
+            <span v-for="source in askSources" :key="source">{{ source }}</span>
+          </div>
+        </article>
+      </section>
     </div>
+
+    <section v-if="disputes.length" class="dispute-board">
+      <div class="visual-briefing-head">
+        <span class="eyebrow">Debate map</span>
+        <h3>Disputes the room had to resolve</h3>
+      </div>
+      <div class="dispute-grid">
+        <article v-for="dispute in disputes.slice(0, 6)" :key="dispute.dispute_id || dispute.question" class="dispute-card">
+          <strong>{{ dispute.question }}</strong>
+          <p>{{ dispute.side_a?.claim }}</p>
+          <p>{{ dispute.side_b?.claim }}</p>
+        </article>
+      </div>
+    </section>
 
     <section v-if="reportOutput" id="published-report" class="published-report">
       <div class="report-masthead">
@@ -447,7 +542,7 @@ import {
   planStructuredSimulation,
   runStructuredSimulation
 } from '../api/simulation'
-import { generateStructuredOutput } from '../api/outputs'
+import { askStructuredState, generateStructuredOutput } from '../api/outputs'
 
 const props = defineProps({
   projectData: { type: Object, default: null },
@@ -469,6 +564,10 @@ const validation = ref(null)
 const transcript = ref('')
 const adapterOutput = ref('')
 const reportOutput = ref(null)
+const askQuestion = ref('')
+const askAnswer = ref('')
+const askFacts = ref([])
+const askSources = ref([])
 const outputTypes = ['numeric_table', 'charts', 'executive_memo', 'news_article']
 
 const prompt = computed(() => props.projectData?.simulation_requirement || props.projectData?.requirement || '')
@@ -476,6 +575,21 @@ const graphId = computed(() => props.projectData?.graph_id || props.graphData?.g
 const projectId = computed(() => props.projectData?.project_id || '')
 
 const visibleAgents = computed(() => agents.value.slice(0, 12))
+const forecastLedger = computed(() => state.value?.forecast_ledger || state.value?.aggregated_outputs?.forecast_ledger || {})
+const forecastThesis = computed(() => state.value?.forecast_thesis || state.value?.aggregated_outputs?.forecast_thesis || forecastLedger.value?.forecast_thesis || null)
+const assumptions = computed(() => state.value?.assumption_registry || state.value?.aggregated_outputs?.assumption_registry || forecastLedger.value?.assumption_registry || [])
+const disputes = computed(() => state.value?.dispute_registry || state.value?.aggregated_outputs?.dispute_registry || forecastLedger.value?.dispute_registry || [])
+const debateReadiness = computed(() => state.value?.debate_readiness || state.value?.aggregated_outputs?.debate_readiness || runSummary.value?.readiness || {})
+const readinessIssues = computed(() => [
+  ...(debateReadiness.value?.blocking_issues || []),
+  ...(debateReadiness.value?.warnings || []),
+])
+const readinessLabel = computed(() => {
+  if (!debateReadiness.value || Object.keys(debateReadiness.value).length === 0) return 'Not checked'
+  const score = debateReadiness.value.score ?? 0
+  return debateReadiness.value.ready === false ? `Blocked · ${score}/100` : `Ready · ${score}/100`
+})
+const ledgerRows = computed(() => forecastLedger.value?.targets || forecastLedger.value?.agent_forecast_rows || [])
 const finalOutcome = computed(() => state.value?.aggregated_outputs?.final_outcome || null)
 const finalForecastRows = computed(() => {
   const final = finalOutcome.value || {}
@@ -723,6 +837,9 @@ const createPlanInternal = async () => {
   transcript.value = ''
   adapterOutput.value = ''
   reportOutput.value = null
+  askAnswer.value = ''
+  askFacts.value = []
+  askSources.value = []
   log(`Domain plan ready: ${domainPlan.value.domain}`)
 }
 
@@ -794,6 +911,19 @@ const loadOutput = (outputType) => runStep('output', async () => {
     ? output
     : output?.markdown || JSON.stringify(output, null, 2)
   reportOutput.value = null
+})
+
+const askState = () => runStep('ask-state', async () => {
+  if (!simulationId.value || !askQuestion.value.trim()) return
+  const res = await askStructuredState({
+    simulation_id: simulationId.value,
+    question: askQuestion.value.trim(),
+  })
+  const payload = res.data || {}
+  askAnswer.value = payload.answer || 'No structured answer is available yet.'
+  askFacts.value = payload.facts || []
+  askSources.value = payload.sources || []
+  log(`Ask State answered from: ${askSources.value.join(', ') || 'structured state'}.`)
 })
 
 const startReportInternal = async () => {
@@ -969,6 +1099,53 @@ h2 {
   color: #8f2a18;
   padding: 16px;
   margin-bottom: 18px;
+}
+
+.thesis-strip,
+.dispute-board {
+  border: 1px solid var(--hx-line-strong);
+  border-radius: 2px;
+  background: rgba(255, 250, 240, 0.9);
+  box-shadow: 3px 3px 0 rgba(42, 32, 21, 0.08);
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.thesis-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+  border-left: 5px solid var(--hx-accent);
+}
+
+.thesis-strip h3 {
+  font-family: var(--hx-font-display);
+  font-size: clamp(24px, 3.5vw, 40px);
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+}
+
+.thesis-strip p {
+  margin-top: 8px;
+  color: rgba(23, 33, 27, 0.66);
+}
+
+.thesis-metrics {
+  display: grid;
+  gap: 8px;
+  min-width: 180px;
+}
+
+.thesis-metrics span {
+  border: 1px solid rgba(42, 32, 21, 0.14);
+  background: rgba(246, 239, 226, 0.86);
+  padding: 8px 10px;
+  font-family: var(--hx-font-mono);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .stage-grid {
@@ -1158,6 +1335,18 @@ button:disabled {
   padding-left: 18px;
 }
 
+.issue-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #8f2a18;
+  font-size: 13px;
+}
+
+.ledger-list {
+  max-height: 120px;
+  overflow: auto;
+}
+
 .output-area {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1184,6 +1373,36 @@ button:disabled {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.dispute-board {
+  margin-top: 16px;
+}
+
+.dispute-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.dispute-card {
+  border: 1px solid rgba(42, 32, 21, 0.16);
+  background: rgba(255, 250, 240, 0.74);
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.dispute-card strong {
+  font-family: var(--hx-font-display);
+  font-size: 19px;
+  line-height: 1.1;
+}
+
+.dispute-card p {
+  color: rgba(23, 33, 27, 0.68);
+  line-height: 1.45;
 }
 
 .room-stage {
@@ -1401,6 +1620,92 @@ button:disabled {
   line-height: 1.65;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.ask-state-card {
+  min-height: 220px;
+}
+
+.state-source-chip {
+  border: 1px solid rgba(42, 32, 21, 0.16);
+  background: rgba(23, 33, 27, 0.08);
+  padding: 7px 10px;
+  font-family: var(--hx-font-mono);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(42, 32, 21, 0.7);
+}
+
+.compact-copy {
+  margin-bottom: 12px;
+}
+
+.ask-state-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.ask-state-form input {
+  min-width: 0;
+  border: 1px solid rgba(42, 32, 21, 0.22);
+  background: rgba(255, 253, 247, 0.95);
+  color: var(--hx-ink);
+  padding: 12px 14px;
+  font: 600 14px/1.4 var(--hx-font-body);
+  outline: none;
+  box-shadow: inset 2px 2px 0 rgba(42, 32, 21, 0.04);
+}
+
+.ask-state-form input:focus {
+  border-color: #8b3a22;
+  box-shadow: 0 0 0 3px rgba(139, 58, 34, 0.12);
+}
+
+.ask-answer {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  border: 1px solid rgba(42, 32, 21, 0.16);
+  border-left: 5px solid #1f6b8f;
+  background: rgba(255, 253, 247, 0.92);
+  padding: 14px;
+}
+
+.ask-answer :deep(p),
+.ask-answer :deep(li) {
+  color: rgba(42, 32, 21, 0.82);
+  line-height: 1.55;
+}
+
+.ask-answer :deep(ul) {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.ask-facts-table {
+  margin-top: 0;
+}
+
+.source-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.source-row span {
+  border: 1px solid rgba(42, 32, 21, 0.12);
+  background: rgba(31, 107, 143, 0.08);
+  color: #1f4f66;
+  padding: 5px 8px;
+  font-family: var(--hx-font-mono);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .forecast-summary {

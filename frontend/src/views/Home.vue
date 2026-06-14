@@ -420,13 +420,16 @@ const startSimulation = async () => {
 .hero-section {
   display: flex;
   justify-content: space-between;
+  gap: clamp(32px, 5vw, 76px);
   margin-bottom: 80px;
   position: relative;
+  overflow: visible;
 }
 
 .hero-left {
   flex: 1;
-  padding-right: 60px;
+  min-width: 0;
+  padding-right: 0;
 }
 
 .tag-row {
@@ -532,22 +535,25 @@ const startSimulation = async () => {
 }
 
 .hero-right {
-  flex: 0.8;
+  flex: 0 1 620px;
+  min-width: min(100%, 420px);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   align-items: flex-end;
+  overflow: visible;
 }
 
 .logo-container {
   width: 100%;
   display: flex;
   justify-content: flex-end;
-  padding-right: 40px;
+  padding-right: clamp(12px, 2vw, 28px);
+  overflow: visible;
 }
 
 .hero-logo {
-  width: min(100%, 520px);
+  width: min(100%, 640px);
   min-height: 220px;
   border: 3px double var(--hx-line-strong);
   background:
@@ -558,8 +564,10 @@ const startSimulation = async () => {
   flex-direction: column;
   justify-content: center;
   align-items: flex-start;
-  padding: 36px;
+  padding: clamp(26px, 3vw, 38px) clamp(44px, 4vw, 62px) clamp(26px, 3vw, 38px) clamp(28px, 3vw, 40px);
   text-transform: uppercase;
+  overflow: visible;
+  box-sizing: border-box;
 }
 
 .hero-logo-kicker {
@@ -572,11 +580,40 @@ const startSimulation = async () => {
 
 .hero-logo-main {
   font-family: var(--font-mono);
-  font-size: clamp(2.8rem, 6vw, 5.6rem);
+  font-size: clamp(2.35rem, 3.9vw, 3.95rem);
   font-weight: 900;
-  letter-spacing: -0.08em;
+  letter-spacing: -0.04em;
   line-height: 0.9;
   color: var(--black);
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow: visible;
+}
+
+.hero-logo-main :deep(.brand-mark) {
+  inline-size: auto;
+  max-inline-size: 100%;
+  width: 100%;
+  column-gap: 0.1em;
+  padding-right: 0.72em;
+  transform: none;
+}
+
+.hero-logo-main :deep(.brand-mark__hero),
+.hero-logo-main :deep(.brand-mark__xl) {
+  font-size: 0.9em;
+  letter-spacing: 0.04em;
+}
+
+.hero-logo-main :deep(.brand-mark__body) {
+  font-size: 0.55em;
+  letter-spacing: 0.16em;
+}
+
+.hero-logo-main :deep(.brand-mark__xl) {
+  margin-left: 0.02em;
+  padding-right: 0.7em;
 }
 
 .scroll-down-btn {
@@ -1214,9 +1251,9 @@ html[lang="en"] .workflow-list {
     radial-gradient(circle at 82% 72%, rgba(192,139,92,0.2), transparent 16rem),
     linear-gradient(135deg, rgba(255,255,255,0.82), rgba(255,255,255,0.38));
   box-shadow: var(--hx-shadow);
-  padding: 44px;
+  padding: 44px 72px 44px 44px;
   position: relative;
-  overflow: clip;
+  overflow: visible;
   backdrop-filter: blur(18px);
 }
 
@@ -1251,21 +1288,46 @@ html[lang="en"] .workflow-list {
 .hero-logo-main {
   color: var(--hx-ink);
   font-family: var(--hx-font-display);
-  font-size: clamp(3.2rem, 6vw, 6rem);
+  font-size: clamp(2.35rem, 4.3vw, 4.65rem);
   letter-spacing: 0;
-  padding-right: 0.5em;
+  padding-right: 0.85em;
   position: relative;
   z-index: 1;
+  width: 100%;
   max-width: 100%;
   overflow: visible;
+  box-sizing: border-box;
 }
 
-.nav-brand .brand-mark,
-.hero-logo-main .brand-mark {
+.nav-brand .brand-mark {
   flex: 0 0 auto;
   min-width: max-content;
   max-width: none;
   overflow: visible;
+}
+
+.hero-logo-main .brand-mark {
+  display: inline-grid;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  box-sizing: border-box;
+}
+
+.hero-logo-main .brand-mark__hero,
+.hero-logo-main .brand-mark__xl {
+  font-size: 0.92em;
+  letter-spacing: 0.04em;
+}
+
+.hero-logo-main .brand-mark__body {
+  font-size: 0.56em;
+  letter-spacing: 0.16em;
+}
+
+.hero-logo-main .brand-mark__xl {
+  padding-right: 0.75em;
 }
 
 .scroll-down-btn {
@@ -1460,6 +1522,16 @@ html[lang="en"] .workflow-list {
   .hero-section {
     min-height: auto;
     gap: 24px;
+  }
+
+  .hero-logo {
+    min-height: 220px;
+    padding: 32px 42px 32px 28px;
+  }
+
+  .hero-logo-main {
+    font-size: clamp(2rem, 9vw, 3.4rem);
+    padding-right: 0.65em;
   }
 
   .main-title {

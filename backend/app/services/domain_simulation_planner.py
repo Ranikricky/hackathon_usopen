@@ -20,6 +20,10 @@ from ..utils.logger import get_logger
 logger = get_logger("horizonxl.services.domain_simulation_planner")
 
 
+class LLMUnavailableError(RuntimeError):
+    """Raised when user-facing planning requires the LLM but it is unreachable."""
+
+
 SCENARIO_FLAGS = {
     "base_case": True,
     "upside_case": True,
@@ -133,7 +137,11 @@ ACTOR_HINT_WORDS = {
     "developer", "executive", "expert", "firm", "government", "group",
     "household", "institution", "investor", "journalist", "leader", "maker",
     "media", "mediator", "mediators", "ministry", "ministries", "observer", "observers", "official", "officials", "operator", "operators",
-    "negotiator", "negotiators",
+    "negotiator", "negotiators", "planner", "planners", "adviser", "advisers",
+    "advisor", "advisors", "diplomat", "diplomats", "underwriter", "underwriters",
+    "witness", "witnesses", "coordinator", "coordinators", "hardliner", "hardliners",
+    "moderator", "moderators", "scout", "scouts", "synthesizer", "synthesizers",
+    "integrator", "integrators", "quant", "quants",
     "organization", "organizations", "participant", "participants", "party", "parties", "people", "platform", "platforms",
     "pollster", "pollsters", "producer", "provider", "providers", "owner", "owners",
     "landlord", "landlords", "influencer", "influencers", "bank", "banks",
@@ -173,8 +181,15 @@ NON_ACTOR_ARTIFACT_TERMS = {
     "time pocket", "time pockets", "event triggered pocket", "baseline pocket",
     "response pocket", "shock pocket", "synthesis pocket", "scenario synthesis",
     "current state snapshot", "current-state snapshot", "historical baseline",
+    "campaign phase", "voting phase", "seat synthesis", "social media virality phase",
+    "social-media virality phase", "influencer spread phase", "generic public discourse phase",
+    "mediator leverage", "agent debate", "debate format", "mechanism clash",
+    "opening claims", "evidence checks", "cross questioning", "cross-questioning",
+    "rebuttals", "concessions", "forecast revisions",
     "boom baseline", "inventory correction", "forecast table", "charts",
     "executive report", "whitepaper", "news article",
+    "shortage", "shortages", "fear", "public fatigue", "medicine access",
+    "banking payment difficulty", "family level stress", "rumor environment",
     "usd", "lfp", "kwh", "twh", "mwh", "gwh",
 }
 
@@ -208,6 +223,8 @@ NON_TARGET_ARTIFACT_TERMS = {
     "light_probability_bands_such_as", "probability_bands_such_as",
     "probability_bands_such_as_the",
     "the_following_probability_bands_such_as",
+    "probability_bands", "fake_probabilities", "fake_probability",
+    "fake_probabilities_probability",
     "table_by_month", "monthly_table", "forecast_table_by_month",
     "outlook", "supply_chain_outlook", "global_outlook",
 }
@@ -242,15 +259,19 @@ GENERIC_METRIC_TERMS = [
 ]
 
 PROCESS_ROLE_TERMS = (
+    "moderator",
     "simulation moderator",
     "moderator actor",
     "negotiation mediator",
     "mediator actor",
     "evidence auditor",
+    "research scout",
     "external research scout",
     "data retrieval analyst",
     "quantitative synthesizer",
     "quantitative synthesizer actor",
+    "scenario synthesizer",
+    "scenario integrator",
 )
 
 SOURCE_SENTENCE_FRAGMENT_TERMS = {
@@ -393,15 +414,20 @@ def _looks_like_horizon_bound(value: str) -> bool:
     lowered = text.lower()
     if not text:
         return False
+    if re.search(r"\bper\s+(?:day|week|month|year)\b", lowered):
+        return False
+    if re.search(r"\b(?:vessels?|traffic|barrels?|tons?|tonnes?|price|cost|premium|fewer than|more than|roughly|approximately|before the crisis|during the disruption)\b", lowered):
+        return False
     if re.search(
         r"\b(?:19|20)\d{2}\b|\bq[1-4]\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b|"
-        r"\b(?:today|current|cutoff|future|next|coming|month|monthly|quarter|quarterly|year|yearly|week|weekly|day|daily|"
-        r"phase|pocket|book|chapter|volume|season|episode)\b",
+        r"\b(?:today|current|cutoff|future|phase|pocket|book|chapter|volume|season|episode)\b",
         lowered,
         flags=re.IGNORECASE,
     ):
         return True
-    if re.search(r"\d", text) and len(text.split()) <= 5:
+    if re.search(r"\b(?:next|coming|following)\s+\d{1,3}\s+(?:days?|weeks?|months?|quarters?|years?)\b", lowered):
+        return True
+    if re.match(r"^\d{1,3}\s+(?:days?|weeks?|months?|quarters?|years?)$", lowered):
         return True
     return False
 
@@ -520,6 +546,20 @@ def _extract_numbered_items_after_heading(
     tail = source[start:]
     stop = re.search(stop_pattern, tail, flags=re.IGNORECASE | re.DOTALL)
     block = tail[:stop.start()] if stop else tail
+    negative = re.search(
+        r"\n\s*(?:do\s+not\s+use|do\s+not\s+include|avoid|forbidden|must\s+not\s+use)\b\s*[:\n]",
+        block,
+        flags=re.IGNORECASE,
+    )
+    if negative:
+        block = block[:negative.start()]
+    hard_stop = re.search(
+        r"\n\s*(?:=+\s*)?(?:AGENT BEHAVIOR RULES|DEBATE FORMAT|VALIDATION REQUIREMENTS|REQUIRED REPORT FORMAT|STYLE REQUIREMENTS|SCENARIOS TO MODEL|SCENARIO PATHS|REQUIRED AGENTS|REQUIRED TIME[- ]?POCKETS?)\b",
+        block,
+        flags=re.IGNORECASE,
+    )
+    if hard_stop:
+        block = block[:hard_stop.start()]
     items: List[str] = []
     for line in block.splitlines():
         cleaned = line.strip()
@@ -550,8 +590,13 @@ def _extract_inline_output_items(text: str) -> List[str]:
             maxsplit=1,
             flags=re.IGNORECASE,
         )[0]
+        expanded_probability_items = _expand_probability_list_phrases(fragment)
+        if expanded_probability_items:
+            items.extend(expanded_probability_items)
         for item in _split_items(fragment):
             cleaned = _strip_metric_modifiers(item)
+            if re.search(r"^probabilit(?:y|ies)\s+(?:for|of)\b", cleaned, flags=re.IGNORECASE):
+                continue
             if (
                 cleaned
                 and len(cleaned.split()) <= 14
@@ -618,18 +663,42 @@ def _dedupe_shadowed_targets(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
 def _extract_explicit_agent_items(text: str) -> List[str]:
     items = _extract_numbered_items_after_heading(
         text,
-        r"(?:create|generate|use|define)\s*(?:\d{1,3}\s+)?(?:[a-z ]+)?agents?\s*(?:as previously defined)?\s*[:\n]",
-        r"(?:\n\s*(?:Agents?\s+(?:must|should)|Each agent|For every agent|Target Variables|Forecast these|Run the simulation|Time[- ]?Pocket|Scenario Paths|Run four scenarios|Required output|Rules)\b|\n\s*\d+\.\s*(?:Target Variables|Time[- ]?Pocket|Scenario Paths|Required output|Rules)\b)",
+        r"(?:^|\n)\s*(?:required\s+agents?|(?:create|generate|use|define)\s+(?:meaningful\s+)?(?:\d{1,3}\s+)?(?:[a-z ]+\s+)?agents?)\s*(?:as previously defined)?\s*[:\n]",
+        r"(?:\n\s*(?:Agents?\s+(?:must|should)|Each agent|For every agent|Agent behavior rules?|Target Variables|Forecast these|Run the simulation|Required Time[- ]?Pockets?|Time[- ]?Pocket|Scenario Paths|Scenarios?\s+to\s+model|Run four scenarios|Debate Format|Validation Requirements|Required Report Format|Style Requirements|Required output|Rules)\b|\n\s*\d+\.\s*(?:Target Variables|Required Time[- ]?Pockets?|Time[- ]?Pocket|Scenario Paths|Scenarios?\s+to\s+model|Required output|Rules)\b)",
         limit=80,
     )
     source = text or ""
-    for match in re.finditer(
-        r"(?:agent architecture|agents?)\s*(?:for\s+horizon\s+xl)?[^\n:—-]{0,80}(?:[:—-])\s*(.+?)(?:\n\s*(?:\d+\.\s*)?(?:agents?\s+(?:must|should)|each agent|for every agent|target variables|forecast these|time[- ]?pocket|scenario paths|run four scenarios|required output|rules)\b|$)",
-        source,
-        flags=re.IGNORECASE | re.DOTALL,
+    # Only treat explicit headings as agent lists. A prior looser regex matched
+    # ordinary sentences like "do not use influencer agents..." and polluted the
+    # actor set with prompt instructions.
+    heading_list_pattern = (
+        r"(?:^|\n)\s*(?:#+\s*)?(?:\d{1,2}[.)]\s*)?"
+        r"(?:agent architecture|agents(?:\s+to\s+create)?|required agents?)"
+        r"(?:\s+for\s+horizon\s+xl)?\s*(?:[:—-]|\n)\s*"
+        r"(.+?)(?=\n\s*(?:=+\s*)?"
+        r"(?:target variables?|forecast these|required target|time[- ]?pockets?|"
+        r"scenario paths?|scenarios?\s+to\s+model|required output|rules|"
+        r"agent behavior rules?|debate format|validation requirements?|"
+        r"required report format|style requirements)\b|"
+        r"\n\s*\d{1,2}[.)]\s*(?:target|scenario|time|required output|rules)\b|$)"
+    )
+    include_line_pattern = (
+        r"(?:^|\n)\s*(?:[-*•]\s*)?"
+        r"(?:agents?\s+include|required agents?\s+include)\s*[:—-]?\s*"
+        r"(.+?)(?=\n\s*\n|\n\s*(?:target|scenario|time|required|rules|agent behavior|debate)\b|$)"
+    )
+    for match in list(re.finditer(heading_list_pattern, source, flags=re.IGNORECASE | re.DOTALL)) + list(
+        re.finditer(include_line_pattern, source, flags=re.IGNORECASE | re.DOTALL)
     ):
-        block = re.sub(r"\([^)]*\)", " ", match.group(1))
-        for item in _split_items(block):
+        block = re.sub(r"(?m)^\s*=+\s*$", " ", match.group(1))
+        block = re.sub(r"\([^)]*\)", " ", block)
+        numbered_lines = []
+        for line in block.splitlines():
+            numbered = re.match(r"^\s*(?:[-*•]|(?:pocket\s*)?\d{1,3}[:.)])\s*(.+?)\s*$", line, flags=re.IGNORECASE)
+            if numbered:
+                numbered_lines.append(numbered.group(1).strip(" .,:;-"))
+        candidate_items = numbered_lines if numbered_lines else _split_items(block)
+        for item in candidate_items:
             cleaned = re.sub(r"\bas previously defined\b", " ", item, flags=re.IGNORECASE)
             cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:;-")
             if cleaned:
@@ -690,7 +759,7 @@ def _extract_explicit_target_items(text: str) -> List[str]:
     items = _extract_numbered_items_after_heading(
         text,
         r"(?:core\s+forecast\s+targets?|forecast\s+targets?|forecast(?:\s+the)?\s+following\s+numeric\s+outputs?|forecast these numeric variables|target variables?(?:\s+that\s+must\s+be\s+numeric)?|target variables?[^:\n]{0,80}|required numeric variables)\s*[:\n]",
-        r"(?:\n\s*(?:Historical baseline|Current political setup|Regional structure|Key forces|Create\s+(?:dynamic\s+)?(?:\d{1,3}\s+)?.*agents?|For every agent|Run the simulation|Time[- ]?Pocket|Scenario Paths|Run four scenarios|Required output|Rules)\b|\n\s*\d+\.\s*(?:Historical|Current|Agent Architecture|Time[- ]?Pocket|Scenario Paths|Required output|Rules)\b)",
+        r"(?:\n\s*(?:Historical baseline|Current political setup|Regional structure|Key forces|Scenarios?\s+to\s+model|Scenario Paths|Required Agents?|Create\s+(?:dynamic\s+)?(?:\d{1,3}\s+)?.*agents?|For every agent|Agent behavior rules?|Run the simulation|Required Time[- ]?Pockets?|Time[- ]?Pocket|Debate Format|Validation Requirements|Required Report Format|Style Requirements|Run four scenarios|Required output|Rules)\b|\n\s*\d+\.\s*(?:Historical|Current|Agent Architecture|Scenarios?\s+to\s+model|Required Agents?|Required Time[- ]?Pockets?|Time[- ]?Pocket|Scenario Paths|Required output|Rules)\b)",
         limit=100,
     )
     merged = []
@@ -710,8 +779,8 @@ def _extract_explicit_target_items(text: str) -> List[str]:
 def _extract_time_pocket_items(text: str) -> List[str]:
     return _extract_numbered_items_after_heading(
         text,
-        r"(?:run the simulation in sequential time pockets|time[- ]?pocket simulation plan|time[- ]?pocket simulation|simulate sequentially|time[- ]?pockets?)\s*[:\n]",
-        r"(?:\n\s*(?:Run four scenarios|Scenario Paths|Required output|Rules)\b|\n\s*\d+\.\s*(?:Scenario Paths|Required output|Rules)\b|$)",
+        r"(?:required\s+time[- ]?pockets?|run the simulation in sequential time pockets|time[- ]?pocket simulation plan|time[- ]?pocket simulation|simulate sequentially|time[- ]?pockets?)\s*[:\n]",
+        r"(?:\n\s*(?:Do not use|Do not include|Avoid|Run four scenarios|Scenario Paths|Debate Format|Validation Requirements|Required Report Format|Required output|Rules)\b|\n\s*\d+\.\s*(?:Scenario Paths|Debate Format|Validation Requirements|Required output|Rules)\b|$)",
         limit=80,
     )
 
@@ -742,6 +811,22 @@ def _extract_scenario_items(text: str) -> List[Dict[str, Any]]:
             "required": True,
         })
     return scenarios
+
+
+def _looks_like_llm_connectivity_issue(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in [
+            "connection error",
+            "could not resolve host",
+            "nodename nor servname",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "timed out",
+            "network is unreachable",
+        ]
+    )
 
 
 def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
@@ -784,7 +869,11 @@ def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
     if not explicit_targets:
         for section in sections:
             cleaned_section = _clean_target_section(section)
-            section_items = _expand_shared_metric_phrases(cleaned_section) + _split_items(cleaned_section)
+            section_items = (
+                _expand_probability_list_phrases(cleaned_section)
+                + _expand_shared_metric_phrases(cleaned_section)
+                + _split_items(cleaned_section)
+            )
             for raw in section_items:
                 lowered = raw.lower()
                 if any(stop in lowered for stop in ["using only", "information available", "based on", "different agents"]):
@@ -811,6 +900,41 @@ def _extract_target_variables(text: str) -> List[Dict[str, Any]]:
         "required": True,
         "description": "Primary simulated outcome requested by the user.",
     }]
+
+
+def _expand_probability_list_phrases(text: str) -> List[str]:
+    """Expand generic phrases like "probabilities for A, B, and C".
+
+    This is deliberately domain-agnostic. It only recognizes a metric family
+    followed by a comma/and list, then turns each listed outcome into an
+    independent metric target.
+    """
+    source = re.sub(r"\s+", " ", text or "").strip()
+    if not source:
+        return []
+    results: List[str] = []
+    patterns = [
+        r"\bprobabilit(?:y|ies)\s+(?:for|of)\s+(.+?)(?:\s+\b(?:with|using|based on|from|over|during|under)\b|$)",
+        r"\b(?:chance|risk|odds)\s+(?:of|for)\s+(.+?)(?:\s+\b(?:with|using|based on|from|over|during|under)\b|$)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, source, flags=re.IGNORECASE):
+            tail = match.group(1).strip(" .,:;-")
+            tail = re.sub(r"\b(?:and\s+)?what\s+would\s+change\s+the\s+forecast\b.*$", "", tail, flags=re.IGNORECASE)
+            parts = _split_items(tail)
+            # `_split_items` may return the original phrase if it sees no
+            # delimiter. Keep only phrases that clearly came from a list.
+            if len(parts) < 2:
+                continue
+            for part in parts:
+                cleaned = part.strip(" .,:;-")
+                cleaned = re.sub(r"^probabilit(?:y|ies)\s+(?:of|for)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .,:;-")
+                if not cleaned:
+                    continue
+                if re.search(r"\b(evidence|assumptions?|disputes?|revisions?|report|forecast)\b", cleaned, flags=re.IGNORECASE):
+                    continue
+                results.append(f"{cleaned} probability")
+    return results
 
 
 def _repair_compact_election_targets(items: List[Dict[str, Any]], text: str) -> List[Dict[str, Any]]:
@@ -1095,15 +1219,26 @@ def _infer_unit(text: str) -> str:
     return "index"
 
 
+def _strip_non_actor_instruction_sections(text: str) -> str:
+    """Keep actor discovery focused on simulation substance, not validation/report instructions."""
+    return re.split(
+        r"\n\s*(?:=+\s*)?(?:AGENT BEHAVIOR RULES|DEBATE FORMAT|VALIDATION REQUIREMENTS|REQUIRED REPORT FORMAT|STYLE REQUIREMENTS)\b",
+        text or "",
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+
+
 def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    explicit_agents = _extract_explicit_agent_items(text)
+    actor_source_text = _strip_non_actor_instruction_sections(text)
+    explicit_agents = _extract_explicit_agent_items(actor_source_text)
     explicit_sections = []
     for pattern in [
         r"agent architecture.*?(?:target variables|time[- ]?pocket|scenario paths|data tables|final|$)",
         r"agents include.*?(?:\.|\n\n|$)",
         r"agents?\s*(?:[:=-]|\n)(.*?)(?:target variables|time[- ]?pocket|scenario paths|data tables|final|$)",
     ]:
-        match = re.search(pattern, text or "", flags=re.IGNORECASE | re.DOTALL)
+        match = re.search(pattern, actor_source_text or "", flags=re.IGNORECASE | re.DOTALL)
         if match:
             explicit_sections.append(match.group(0))
 
@@ -1118,9 +1253,12 @@ def _extract_agent_archetypes(text: str, target_variables: List[Dict[str, Any]])
         for section in explicit_sections:
             candidates.extend(_split_items(section))
     if not candidates:
-        candidates.extend(_actor_candidates_from_context(text))
+            candidates.extend(_actor_candidates_from_context(actor_source_text))
 
-    participant_candidates = _participant_candidates_from_context(text)
+    # If the prompt gives a substantial explicit roster, respect it. Inferred
+    # population cohorts are useful when the prompt is underspecified, but they
+    # become filler when a user has already named the room.
+    participant_candidates = [] if len(explicit_agents) >= 10 else _participant_candidates_from_context(actor_source_text)
     archetypes = []
     seen = set()
     max_archetypes = max(
@@ -1290,6 +1428,17 @@ def _cohort_from_observer_role(name: str) -> Optional[str]:
         return None
     if base.lower() in {"primary", "independent", "external"}:
         return None
+    group_terms = {
+        "voter", "voters", "consumer", "consumers", "worker", "workers",
+        "household", "households", "resident", "residents", "citizen", "citizens",
+        "community", "communities", "beneficiary", "beneficiaries", "student", "students",
+        "tenant", "tenants", "homeowner", "homeowners", "patient", "patients",
+        "farmer", "farmers", "user", "users", "women", "minority", "youth",
+        "rural", "urban", "middle-class", "expatriate", "ground-truth",
+    }
+    base_words = set(re.findall(r"[a-z-]+", base.lower()))
+    if not (base_words & group_terms):
+        return None
     return f"{base} Cohort"
 
 
@@ -1306,11 +1455,18 @@ def _should_output_numbers(name: str) -> bool:
     narrative_public_terms = [
         "journalist", "media", "narrative", "watchdog", "governance", "observer",
         "strategist", "negotiator", "campaign", "party", "executive", "operator",
+        "witness", "diplomat", "planner", "adviser", "advisor", "hardliner",
+        "coordinator", "representative",
     ]
     numeric_terms = [
         "quant", "data", "pollster", "scientist", "economist", "researcher", "analyst",
         "forecaster", "model", "statistic", "auditor", "synthesizer", "retrieval",
         "numeric", "survey", "polling", "measurement", "probability", "risk",
+    ]
+    strong_numeric_terms = [
+        "quant", "data", "pollster", "scientist", "economist", "researcher", "analyst",
+        "forecaster", "model", "statistic", "auditor", "synthesizer", "retrieval",
+        "numeric", "survey", "polling", "measurement",
     ]
     if _is_process_role_actor(name):
         return False
@@ -1319,6 +1475,10 @@ def _should_output_numbers(name: str) -> bool:
     # fake precision, unless the prompt explicitly casts them as data/poll/quant roles.
     if any(term in lowered for term in lived_experience_terms) and not any(
         term in lowered for term in ["data", "poll", "pollster", "survey", "statistic", "quant", "model"]
+    ):
+        return False
+    if any(term in lowered for term in narrative_public_terms) and not any(
+        term in lowered for term in strong_numeric_terms
     ):
         return False
     if has_numeric_skill:
@@ -1457,6 +1617,8 @@ def _looks_like_target_actor_artifact(value: str, target_names: set[str]) -> boo
     if any(cleaned and (cleaned in target or target in cleaned) for target in target_names):
         if not re.search(
             r"(agents?|actors?|analysts?|auditors?|moderators?|mediators?|scouts?|"
+            r"strategists?|planners?|advisers?|advisors?|diplomats?|experts?|"
+            r"underwriters?|witnesses?|coordinators?|hardliners?|synthesizers?|integrators?|quants?|"
             r"labs?|providers?|developers?|cios?|cfos?|managers?|workers?|consumers?|"
             r"regulators?|teams?|consultants?|investors?|miners?|refiners?|manufacturers?|"
             r"automakers?|buyers?|traders?|operators?|landlords?|tenants?)$",
@@ -1472,7 +1634,7 @@ def _looks_like_target_actor_artifact(value: str, target_names: set[str]) -> boo
 
 def _looks_actorish(value: str) -> bool:
     lowered = (value or "").lower()
-    if not lowered or any(stop in lowered for stop in ["target variable", "scenario", "data table", "copy paste", "simulation question", "every agent", "force every agent"]):
+    if not lowered or any(stop in lowered for stop in ["target variable", "data table", "copy paste", "simulation question", "every agent", "force every agent"]):
         return False
     if _is_non_actor_artifact(value):
         return False
@@ -1502,7 +1664,7 @@ def _is_non_actor_artifact(value: str) -> bool:
     words = re.findall(r"[a-z0-9]+", lowered)
     if any(term in words for term in SOURCE_SENTENCE_FRAGMENT_TERMS):
         return True
-    if len(words) > 5 and not re.search(
+    if len(words) > 5 and not (set(words) & ACTOR_HINT_WORDS) and not re.search(
         r"\b(?:actors?|agents?|analysts?|auditors?|mediators?|moderators?|scouts?|synthesizers?|"
         r"miners?|refiners?|manufacturers?|automakers?|buyers?|consumers?|traders?|regulators?|"
         r"operators?|voters?|workers?|households?|participants?|communities?|watchdogs?)\b$",
@@ -1650,6 +1812,7 @@ class DomainSimulationPlanner:
         user_question: str,
         document_text: str = "",
         project_id: Optional[str] = None,
+        allow_fallback: Optional[bool] = None,
     ) -> Dict[str, Any]:
         user_question = (user_question or "").strip()
         if not user_question:
@@ -1657,9 +1820,11 @@ class DomainSimulationPlanner:
 
         combined = f"{user_question}\n{document_text or ''}"
         prompt_target_source = user_question
+        if allow_fallback is None:
+            allow_fallback = not Config.LLM_REQUIRED_FOR_PLANNING
         try:
             if self.llm_client is None:
-                self.llm_client = LLMClient()
+                self.llm_client = LLMClient(timeout=Config.PLANNER_LLM_TIMEOUT_SECONDS)
             executor = ThreadPoolExecutor(max_workers=1)
             try:
                 future = executor.submit(self._plan_with_llm, user_question, document_text)
@@ -1668,13 +1833,23 @@ class DomainSimulationPlanner:
                 executor.shutdown(wait=False, cancel_futures=True)
             plan = self._normalize_plan(raw, combined, target_text=prompt_target_source)
         except FutureTimeoutError:
-            logger.warning(
-                "Planner LLM timed out after %.1fs, using context-derived fallback",
-                Config.PLANNER_LLM_TIMEOUT_SECONDS,
-            )
+            message = f"Planner LLM timed out after {Config.PLANNER_LLM_TIMEOUT_SECONDS:.1f}s"
+            if not allow_fallback:
+                raise LLMUnavailableError(message)
+            logger.warning("%s, using context-derived fallback", message)
             plan = self._fallback_plan(combined, target_text=prompt_target_source)
         except Exception as exc:
-            logger.warning(f"Planner LLM failed, using context-derived fallback: {exc}")
+            if not allow_fallback:
+                raise LLMUnavailableError(
+                    f"Planner LLM is required but unavailable: {exc}"
+                ) from exc
+            if _looks_like_llm_connectivity_issue(exc):
+                logger.debug(
+                    "Planner LLM unavailable from this runtime, using context-derived fallback: %s",
+                    exc,
+                )
+            else:
+                logger.warning(f"Planner LLM failed, using context-derived fallback: {exc}")
             plan = self._fallback_plan(combined, target_text=prompt_target_source)
 
         if project_id:

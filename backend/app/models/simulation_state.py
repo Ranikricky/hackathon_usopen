@@ -30,6 +30,11 @@ class StructuredSimulationState:
     state_variables: List[Dict[str, Any]] = field(default_factory=list)
     agent_outputs: List[Dict[str, Any]] = field(default_factory=list)
     discussion_transcript: List[Dict[str, Any]] = field(default_factory=list)
+    forecast_thesis: Dict[str, Any] = field(default_factory=dict)
+    assumption_registry: List[Dict[str, Any]] = field(default_factory=list)
+    dispute_registry: List[Dict[str, Any]] = field(default_factory=list)
+    debate_readiness: Dict[str, Any] = field(default_factory=dict)
+    forecast_ledger: Dict[str, Any] = field(default_factory=dict)
     scenario_outputs: Dict[str, Any] = field(default_factory=dict)
     aggregated_outputs: Dict[str, Any] = field(default_factory=dict)
     validation: Dict[str, Any] = field(default_factory=dict)
@@ -51,6 +56,11 @@ class StructuredSimulationState:
             state_variables=data.get("state_variables") or [],
             agent_outputs=data.get("agent_outputs") or [],
             discussion_transcript=data.get("discussion_transcript") or [],
+            forecast_thesis=data.get("forecast_thesis") or {},
+            assumption_registry=data.get("assumption_registry") or [],
+            dispute_registry=data.get("dispute_registry") or [],
+            debate_readiness=data.get("debate_readiness") or {},
+            forecast_ledger=data.get("forecast_ledger") or {},
             scenario_outputs=data.get("scenario_outputs") or {},
             aggregated_outputs=data.get("aggregated_outputs") or {},
             validation=data.get("validation") or {},
@@ -373,7 +383,25 @@ class SimulationStateManager:
         voice = voice_bank[seed % len(voice_bank)]
         private_concern = stake_bank[(seed // 7) % len(stake_bank)]
 
-        if any(term in role_l for term in ["strategist", "campaign", "party"]):
+        if any(term in role_l for term in ["security", "military", "pentagon", "centcom", "irgc", "force-protection", "hardliner"]):
+            vantage = "a crisis room where deterrence, retaliation risk, readiness, red lines, and miscalculation are weighed under pressure"
+            objective = "separate visible signaling from actual escalation incentives and operational constraints"
+            default_tension = "a move meant as deterrence can be read as preparation for escalation"
+            background = "Works from force posture, public threats, operational timelines, regional exposure, and the risk that a local incident changes the whole path."
+            knowledge_boundary = "Does not fully see private diplomacy, domestic political fatigue, or how civilians and markets absorb the pressure."
+        elif any(term in role_l for term in ["diplomat", "negotiator", "mediator", "alliance"]):
+            vantage = "a bargaining table where face-saving exits, veto players, private assurances, and public red lines compete"
+            objective = "identify whether the actors still have an off-ramp or whether public commitments trap them"
+            default_tension = "publicly hard positions can coexist with private room for compromise"
+            background = "Reads communiques, back-channel incentives, third-party pressure, alliance cohesion, and the cost of appearing weak."
+            knowledge_boundary = "May overestimate rational bargaining when events, pride, or domestic politics take over."
+        elif any(term in role_l for term in ["oil", "lng", "shipping", "port", "logistics", "insurance", "underwriter", "trader", "market"]):
+            vantage = "a market and logistics desk where fear becomes real only through cargo delays, insurance costs, routing, inventory, and liquidity"
+            objective = "translate geopolitical tension into measurable supply, price, freight, and risk-premium channels"
+            default_tension = "markets can overreact to headlines and underreact to slow operational bottlenecks"
+            background = "Tracks cargo flows, spare capacity, insurance premiums, shipping routes, inventory buffers, price bands, and timing of physical disruption."
+            knowledge_boundary = "May underweight political symbolism, military signaling, or civilian stress that has not yet hit prices."
+        elif any(term in role_l for term in ["strategist", "campaign", "party"]):
             vantage = "a campaign room where turnout, candidate quality, message discipline, and opponent mistakes are converted into seats"
             objective = "protect the side's route to victory while identifying where the map can break"
             default_tension = "public confidence may hide private vulnerability"
@@ -453,8 +481,8 @@ class SimulationStateManager:
             knowledge_boundary = "Does not decide strategy; it decides whether evidence is strong enough to support a claim."
         else:
             clean_role = display_name or role or "this actor"
-            vantage = f"the practical world of {clean_role}, where incentives, constraints, and private reactions can differ from the public story"
-            objective = f"make the room account for what {clean_role} can see, do, withhold, or misread"
+            vantage = f"the operating lane closest to {clean_role}, where incentives, constraints, and private reactions may differ from the public story"
+            objective = f"state what {clean_role} can observe, what it can influence, and where it might misread the wider system"
             default_tension = "one actor can understand its own lane well while still misreading the wider system"
             background = "Brings role-specific exposure, incentives, information gaps, and practical constraints into the simulation."
             knowledge_boundary = "May overread its own lane and needs other agents to test whether the signal generalizes."
@@ -605,6 +633,15 @@ class SimulationStateManager:
         if any(term in role_l for term in ["voter", "consumer", "worker", "household", "community", "beneficiary", "patient", "student"]):
             direct_stake = "personal material outcome, local dignity, safety, access, household budget, or lived future"
             downside_exposure = "bears consequences directly but has limited control over institutions"
+        elif any(term in role_l for term in ["security", "military", "pentagon", "centcom", "irgc", "force-protection", "hardliner"]):
+            direct_stake = "deterrence credibility, force protection, escalation control, institutional authority, and operational risk"
+            downside_exposure = "misreads signaling, triggers avoidable escalation, or fails to protect assets and personnel"
+        elif any(term in role_l for term in ["diplomat", "negotiator", "mediator", "alliance"]):
+            direct_stake = "deal credibility, alliance cohesion, face-saving room, and avoiding a public failure of bargaining"
+            downside_exposure = "overestimates private compromise or misses when domestic politics makes a deal impossible"
+        elif any(term in role_l for term in ["oil", "lng", "shipping", "port", "logistics", "insurance", "underwriter", "trader", "market"]):
+            direct_stake = "price exposure, cargo reliability, insurance loss, routing cost, inventory timing, or market credibility"
+            downside_exposure = "misprices risk, misses a physical bottleneck, or mistakes headline fear for actual disruption"
         elif any(term in role_l for term in ["strategist", "campaign", "party", "executive", "operator", "trader"]):
             direct_stake = "career, reputation, power, budget control, market position, or organizational mandate"
             downside_exposure = "penalized if strategy fails or if private weakness becomes public"
@@ -660,6 +697,9 @@ class SimulationStateManager:
     def _speaks_strongly_about(cls, role_l: str) -> List[str]:
         topics = []
         mapping = [
+            (["security", "military", "pentagon", "centcom", "irgc", "force-protection", "hardliner"], ["deterrence", "red lines", "force protection", "escalation control"]),
+            (["diplomat", "negotiator", "mediator", "alliance"], ["off-ramps", "bargaining leverage", "face-saving terms", "veto players"]),
+            (["oil", "lng", "shipping", "port", "logistics", "insurance", "underwriter", "trader", "market"], ["risk premium", "physical bottlenecks", "routing and freight", "inventory timing"]),
             (["strategist", "campaign", "party", "operator", "executive"], ["conversion mechanics", "incentives", "opponent strategy", "execution capacity"]),
             (["voter", "consumer", "beneficiary", "rural", "urban", "poor", "middle", "cohort", "household", "community"], ["lived experience", "participation motivation", "local trust", "benefit credibility"]),
             (["minority", "women", "youth", "worker", "student", "patient", "user"], ["subgroup behavior", "identity pressure", "household decision-making", "ground-truth response"]),

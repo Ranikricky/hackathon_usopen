@@ -13,8 +13,24 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 
-STRUCTURED_ENGINE = "structured_simulation"
+STRUCTURED_ENGINE = "structured_forecast"
+STRUCTURED_ENGINE_ALIASES = {"structured_forecast", "structured_simulation", "structured"}
 SOCIAL_DISCOURSE_ENGINE = "social_discourse"
+
+
+def normalize_engine_mode(value: Any = None) -> str:
+    """Return the canonical engine mode.
+
+    `structured_simulation` existed in earlier Horizon XL builds. Keep it as an
+    accepted alias so saved projects continue to run, but persist new contracts
+    as `structured_forecast` to make the product boundary clear.
+    """
+    mode = str(value or "").strip().lower()
+    if mode == SOCIAL_DISCOURSE_ENGINE:
+        return SOCIAL_DISCOURSE_ENGINE
+    if mode in STRUCTURED_ENGINE_ALIASES:
+        return STRUCTURED_ENGINE
+    return STRUCTURED_ENGINE
 
 
 REPORT_TEMPLATE_BY_DOMAIN = {
@@ -138,7 +154,7 @@ def _extract_fragment_buckets(prompt: str, plan: Dict[str, Any]) -> Dict[str, Li
 def select_engine_mode(plan: Dict[str, Any], prompt: str = "") -> str:
     """Default to the structured engine unless the user asks for social discourse."""
     domain = str((plan or {}).get("domain") or "").lower()
-    lowered = (prompt or "").lower()
+    lowered = _strip_negative_social_instructions(prompt or "").lower()
     social_signals = [
         "twitter simulation",
         "reddit simulation",
@@ -149,6 +165,9 @@ def select_engine_mode(plan: Dict[str, Any], prompt: str = "") -> str:
         "online discourse",
         "social_discourse",
     ]
+    explicit_engine = normalize_engine_mode((plan or {}).get("engine_mode"))
+    if explicit_engine == SOCIAL_DISCOURSE_ENGINE:
+        return SOCIAL_DISCOURSE_ENGINE
     if domain == "social" and any(signal in lowered for signal in social_signals):
         return SOCIAL_DISCOURSE_ENGINE
     if any(signal in lowered for signal in social_signals):
@@ -161,6 +180,8 @@ def select_report_template(plan: Dict[str, Any], prompt: str = "") -> str:
     if domain in REPORT_TEMPLATE_BY_DOMAIN:
         return REPORT_TEMPLATE_BY_DOMAIN[domain]
     lowered = (prompt or "").lower()
+    if re.search(r"\b(geopolitic|military|naval|conflict|war|escalation|diplomatic|sanction|shipping-risk)\b", lowered):
+        return "geopolitical_risk_memo"
     if re.search(r"\b(story|novel|fiction|character|canon|battle|throne|survive|die)\b", lowered):
         return "narrative_fiction_forecast"
     if re.search(r"\b(oil|gas|commodity|copper|gold|brent|wti|price)\b", lowered):
@@ -172,6 +193,19 @@ def select_report_template(plan: Dict[str, Any], prompt: str = "") -> str:
     if re.search(r"\b(strategy|business|company|market entry|consumer trend)\b", lowered):
         return "business_strategy_memo"
     return "generic_forecast_memo"
+
+
+def _strip_negative_social_instructions(prompt: str) -> str:
+    """Remove sentences where social-discourse terms are mentioned only to forbid them."""
+    kept: List[str] = []
+    for fragment in _split_prompt_fragments(prompt):
+        lowered = fragment.lower()
+        has_social = re.search(r"\b(twitter|reddit|social media|online discourse|public discourse|simulate posts|simulate comments)\b", lowered)
+        is_negative = re.search(r"\b(do not|don't|avoid|not a|not an|unless explicitly|never)\b", lowered)
+        if has_social and is_negative:
+            continue
+        kept.append(fragment)
+    return "\n".join(kept)
 
 
 def build_domain_contract(
@@ -193,7 +227,7 @@ def build_domain_contract(
         "project_id": project_id,
         "approved": bool(approved or overrides.get("approved")),
         "domain": overrides.get("domain") or plan.get("domain") or "other",
-        "engine_mode": overrides.get("engine_mode") or select_engine_mode(plan, prompt),
+        "engine_mode": normalize_engine_mode(overrides.get("engine_mode") or select_engine_mode(plan, prompt)),
         "report_template": overrides.get("report_template") or select_report_template(plan, prompt),
         "user_question": overrides.get("user_question") or plan.get("user_question") or prompt,
         "domain_plan": plan,
@@ -229,7 +263,7 @@ def domain_plan_from_contract(contract: Optional[Dict[str, Any]], fallback_plan:
             plan["time_pockets"] = contract.get("time_pockets") or plan.get("time_pockets") or []
             plan["required_outputs"] = contract.get("output_requirements") or plan.get("required_outputs") or []
             plan["domain_contract"] = {
-                "engine_mode": contract.get("engine_mode") or STRUCTURED_ENGINE,
+                "engine_mode": normalize_engine_mode(contract.get("engine_mode")),
                 "report_template": contract.get("report_template") or "generic_forecast_memo",
                 "approved": bool(contract.get("approved")),
             }

@@ -324,6 +324,10 @@ class NumericValidationService:
         contract_ref = plan.get("domain_contract") if isinstance(plan.get("domain_contract"), dict) else {}
         aggregated = state.get("aggregated_outputs") or {}
         agents = state.get("agents") or []
+        forecast_thesis = state.get("forecast_thesis") or aggregated.get("forecast_thesis") or {}
+        assumptions = state.get("assumption_registry") or aggregated.get("assumption_registry") or []
+        disputes = state.get("dispute_registry") or aggregated.get("dispute_registry") or []
+        readiness = state.get("debate_readiness") or aggregated.get("debate_readiness") or {}
         targets = [
             str(item.get("name") or "")
             for item in plan.get("target_variables", []) or []
@@ -334,6 +338,27 @@ class NumericValidationService:
 
         if contract_ref and contract_ref.get("approved") is False:
             errors.append("Domain Contract is present but not approved.")
+
+        engine_mode = str(contract_ref.get("engine_mode") or plan.get("engine_mode") or "").lower()
+        if engine_mode == "social_discourse":
+            text = "\n".join([
+                str(plan.get("domain") or ""),
+                str(plan.get("user_question") or ""),
+            ]).lower()
+            if not re.search(r"\b(twitter|reddit|social media|online discourse|public discourse|posts?|comments?|viral|community reaction)\b", text):
+                errors.append("Social discourse engine selected without an explicit social-media/public-discourse prompt.")
+
+        if not forecast_thesis or not forecast_thesis.get("statement"):
+            errors.append("Forecast Thesis is missing; debate cannot be evaluated as a forecast process.")
+        if not assumptions:
+            errors.append("Assumption Registry is missing or empty; debate has no assumptions to test.")
+        if not disputes:
+            errors.append("Dispute Registry is missing or empty; debate has no structured disagreement to resolve.")
+        if readiness and not readiness.get("ready", False):
+            errors.append(
+                "Debate readiness failed: "
+                + ", ".join(str(item) for item in readiness.get("blocking_issues", [])[:8])
+            )
 
         if contract_ref:
             expected_template = contract_ref.get("report_template")
@@ -347,6 +372,8 @@ class NumericValidationService:
             target for target in targets
             if self._is_semantic_bad_target(target)
         ]
+        scenario_fragments = self._scenario_target_leaks(targets, plan)
+        bad_targets.extend(scenario_fragments)
         if bad_targets:
             errors.append(
                 "Target extraction leaked instructions, placeholders, or output-format phrases: "
@@ -380,19 +407,67 @@ class NumericValidationService:
                 errors.append("Wrong time-pocket structure: plan implies multiple sequential pockets but only one pocket was saved.")
             if self._looks_like_instruction_fragment(pocket_labels):
                 errors.append("Time-pocket labels contain instruction/output-format fragments rather than temporal or event boundaries.")
+            if self._contains_forbidden_phase_leakage(pocket_labels, plan):
+                errors.append("Time-pocket labels leaked forbidden or wrong-domain process phases.")
 
         if discussion:
             turn_types = {str(turn.get("turn_type") or "") for turn in discussion if isinstance(turn, dict)}
             if not ({"challenge", "rebuttal", "moderator_cross_question"} & turn_types):
                 errors.append("Weak debate quality: transcript has no challenge, rebuttal, or moderator cross-question turns.")
+            if "concession" not in turn_types:
+                errors.append("Weak debate quality: transcript has no explicit concession turns.")
+            if "mediated_revision" not in turn_types:
+                errors.append("Weak debate quality: transcript has no mediated forecast revision turns.")
             if len(discussion) < max(6, min(18, len(agents))):
                 warnings.append("Debate transcript is short relative to the agent roster.")
 
         ledger = aggregated.get("forecast_ledger") if isinstance(aggregated, dict) else {}
         if not isinstance(ledger, dict) or not ledger.get("agent_forecast_rows"):
             errors.append("Clean Forecast Ledger is missing or empty; reports must not consume raw agent logs.")
+        else:
+            if not ledger.get("forecast_thesis"):
+                errors.append("Clean Forecast Ledger is missing the Forecast Thesis.")
+            if not ledger.get("assumption_registry"):
+                errors.append("Clean Forecast Ledger is missing assumptions.")
+            if not ledger.get("dispute_registry"):
+                errors.append("Clean Forecast Ledger is missing disputes.")
 
         return errors, warnings
+
+    def _scenario_target_leaks(self, targets: List[str], plan: Dict[str, Any]) -> List[str]:
+        scenario_structure = plan.get("scenario_structure") or {}
+        scenarios = scenario_structure.get("scenarios") if isinstance(scenario_structure, dict) else []
+        scenario_fragments = set()
+        for item in scenarios or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ["id", "name", "description"]:
+                value = str(item.get(key) or "")
+                cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", value.lower()).strip("_")
+                if len(cleaned) >= 8:
+                    scenario_fragments.add(cleaned)
+        leaked = []
+        for target in targets:
+            cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", str(target or "").lower()).strip("_")
+            if cleaned.startswith("probability_"):
+                continue
+            if any(cleaned == frag or cleaned in frag or frag in cleaned for frag in scenario_fragments):
+                leaked.append(target)
+        return leaked
+
+    def _contains_forbidden_phase_leakage(self, pocket_labels: str, plan: Dict[str, Any]) -> bool:
+        domain = str(plan.get("domain") or "").lower()
+        lowered = str(pocket_labels or "").lower()
+        forbidden_process_terms = [
+            "election baseline", "campaign phase", "voting phase", "seat synthesis",
+            "social-media virality", "social media virality", "influencer spread",
+            "generic public discourse",
+        ]
+        if any(term in lowered for term in forbidden_process_terms):
+            if "election" in domain and not any(term in lowered for term in ["social-media", "social media", "influencer", "generic public discourse"]):
+                return False
+            return True
+        return False
 
     def _is_semantic_bad_target(self, target: str) -> bool:
         cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", str(target or "").lower()).strip("_")
@@ -409,7 +484,9 @@ class NumericValidationService:
     def _looks_like_instruction_fragment(self, text: str) -> bool:
         lowered = str(text or "").lower()
         return bool(re.search(
-            r"\b(do not|must|should|required output|then explain|produce numeric|generate report|copy paste|rules?)\b",
+            r"\b(do not|must|should|required output|then explain|produce numeric|generate report|copy paste|rules?|"
+            r"campaign phase|voting phase|seat synthesis|social[- ]media virality|influencer spread|generic public discourse|"
+            r"agent debate|mediator leverage|mechanism clash)\b",
             lowered,
         ))
 
@@ -421,6 +498,8 @@ class NumericValidationService:
             if cleaned in {"agent", "actor", "participant", "person", "organization", "dynamic_agents", "stakeholder"}:
                 generic.append(name or str(agent.get("agent_id") or "unknown"))
             elif re.fullmatch(r"(?:dynamic|generic|simulation|scenario|forecast|target).{0,20}(?:agent|actor|participant)s?", cleaned):
+                generic.append(name)
+            elif re.search(r"(?:^|_)(?:campaign_phase|voting_phase|seat_synthesis|social_media_virality_phase|influencer_spread_phase|generic_public_discourse_phase|agent_debate|mediator_leverage)(?:_|$)", cleaned):
                 generic.append(name)
         return generic
 

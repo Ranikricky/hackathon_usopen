@@ -127,6 +127,64 @@ def _compact_claim_text(title: str, excerpt: str) -> str:
     return (title or "External source discovered")[:280]
 
 
+def _is_instruction_or_structural_fragment(text: str) -> bool:
+    """Reject process instructions, JSON/dict fragments, and list ordinals as facts."""
+    lowered = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not lowered:
+        return True
+    structural_patterns = [
+        "pocket_id",
+        "'start':",
+        '"start":',
+        "'end':",
+        '"end":',
+        "'events':",
+        '"events":',
+        "target variables",
+        "required outputs",
+        "forecast the following",
+        "time pockets include",
+        "targets contain placeholder",
+        "style requirements",
+        "agent must",
+        "agents must",
+        "for every agent",
+        "each agent",
+        "do not use",
+        "do not invent",
+        "separate confirmed facts",
+        "evidence auditor must",
+        "run a structured",
+        "run the simulation",
+        "produce numeric",
+        "clearly separate facts",
+        "what are the most likely paths",
+        "next 90 days, divided into",
+        "forecast horizon",
+    ]
+    if any(pattern in lowered for pattern in structural_patterns):
+        return True
+    if re.match(r"^(?:days?\s+\d+|days?\s+\d+\s*[–-]\s*\d+|scenario synthesis|forecast ledger|current state)\b", lowered):
+        return True
+    if lowered.startswith(("{", "}", "[", "]")) or re.search(r"[{}]{1,}.*:", lowered):
+        return True
+    if re.match(r"^\d{1,2}\.\s+", lowered):
+        # A numbered instruction/list item is not a numeric fact unless it also
+        # contains a real measurement, date, money amount, percentage, or range.
+        without_ordinal = re.sub(r"^\d{1,2}\.\s+", "", lowered)
+        has_real_measure = bool(re.search(
+            r"[$€£₹]\s?\d|\b(?:19|20)\d{2}\b|\d[\d,]*(?:\.\d+)?\s*(?:%|percent|bps|"
+            r"million|billion|trillion|m\b|bn\b|tn\b|kwh|mwh|gwh|twh|tons?|tonnes?|"
+            r"barrels?|bpd|mb/d|usd|dollars?|seats?|votes?|months?|years?)|"
+            r"\d[\d,]*(?:\.\d+)?\s*[-–]\s*\d[\d,]*(?:\.\d+)?",
+            without_ordinal,
+            flags=re.IGNORECASE,
+        ))
+        if not has_real_measure:
+            return True
+    return False
+
+
 def _extract_numeric_fact_texts(text: str, limit: int = 24) -> list[str]:
     """Extract short text spans that contain numbers/units for evidence review."""
     if not text:
@@ -139,7 +197,7 @@ def _extract_numeric_fact_texts(text: str, limit: int = 24) -> list[str]:
         r"\b(?:usd|eur|gbp|inr|dollars?)\s?\d[\d,]*(?:\.\d+)?|"
         r"\d[\d,]*(?:\.\d+)?\s*(?:%|percent|bps|basis points|million|billion|trillion|m|bn|tn|"
         r"kwh|mwh|gwh|twh|tons?|tonnes?|metric tons?|per metric ton|barrels?|bpd|mb/d|usd|dollars?|"
-        r"seats?|votes?|months?|years?)|"
+        r"seats?|votes?|months?|years?|days?|vessels?|ships?|seafarers?|routes?|premiums?|rates?)|"
         r"\b\d{4}\s*[-–]\s*\d{2,4}\b|"
         r"\b\d[\d,]*(?:\.\d+)?\s*[-–]\s*\d[\d,]*(?:\.\d+)?\b)",
         flags=re.IGNORECASE,
@@ -147,6 +205,8 @@ def _extract_numeric_fact_texts(text: str, limit: int = 24) -> list[str]:
     for clause in clauses:
         cleaned = re.sub(r"\s+", " ", clause).strip(" -•")
         if len(cleaned) < 12:
+            continue
+        if _is_instruction_or_structural_fragment(cleaned):
             continue
         if not numeric_pattern.search(cleaned):
             continue
@@ -158,6 +218,8 @@ def _extract_numeric_fact_texts(text: str, limit: int = 24) -> list[str]:
             end = min(len(cleaned), numeric_match.end() + 220)
             window = cleaned[start:end].strip(" ,:;-")
             if len(window) < 12:
+                continue
+            if _is_instruction_or_structural_fragment(window):
                 continue
             key = window.lower()
             if key in seen:
@@ -1328,7 +1390,6 @@ def build_graph():
                 generation_seed=project.generation_seed or "",
                 parameter_context="\n\n".join(
                     part for part in [
-                        f"=== APPROVED_DOMAIN_CONTRACT ===\n{domain_contract}" if domain_contract else "",
                         text or "",
                         project.simulation_requirement or "",
                     ] if part

@@ -33,12 +33,20 @@ class StructuredReportAdapter:
         summary = self._summary(plan, state)
         sections = [
             {
-                "title": "Template Lens",
-                "content": self._template_lens(state),
-            },
-            {
                 "title": "The Human Read",
                 "content": self._reader_lead(plan, state),
+            },
+            {
+                "title": "Bottom Line",
+                "content": self._bottom_line(plan, state),
+            },
+            {
+                "title": "Forecast Thesis",
+                "content": self._forecast_thesis_section(state),
+            },
+            {
+                "title": "Assumptions and Disputes",
+                "content": self._assumptions_disputes_section(state),
             },
             {
                 "title": "Executive Briefing",
@@ -77,6 +85,10 @@ class StructuredReportAdapter:
                 "content": self._simulation_setup(plan, state),
             },
             {
+                "title": "Template Lens",
+                "content": self._template_lens(state),
+            },
+            {
                 "title": "Agent Appendix",
                 "content": self._agent_architecture(state),
             },
@@ -108,6 +120,57 @@ class StructuredReportAdapter:
             "forecast_ledger": ledger,
             "report_template": template_id,
         }
+
+    def _forecast_thesis_section(self, state: Dict[str, Any]) -> str:
+        ledger = state.get("forecast_ledger") or (state.get("aggregated_outputs") or {}).get("forecast_ledger") or {}
+        thesis = state.get("forecast_thesis") or ledger.get("forecast_thesis") or {}
+        if not thesis:
+            return "No Forecast Thesis was saved. This should block polished report generation."
+        lines = [
+            f"**Thesis:** {thesis.get('statement') or 'missing'}",
+            f"**Confidence:** `{thesis.get('confidence') or 'unknown'}`",
+            f"**Status:** `{thesis.get('status') or 'unknown'}`",
+        ]
+        drivers = thesis.get("core_drivers") or []
+        challenges = thesis.get("known_challenges") or []
+        if drivers:
+            lines.append("**Core drivers:** " + "; ".join(str(item) for item in drivers[:6]))
+        if challenges:
+            lines.append("**Known challenges:** " + "; ".join(str(item) for item in challenges[:6]))
+        return "\n\n".join(lines)
+
+    def _assumptions_disputes_section(self, state: Dict[str, Any]) -> str:
+        ledger = state.get("forecast_ledger") or (state.get("aggregated_outputs") or {}).get("forecast_ledger") or {}
+        assumptions = state.get("assumption_registry") or ledger.get("assumption_registry") or []
+        disputes = state.get("dispute_registry") or ledger.get("dispute_registry") or []
+        parts: List[str] = []
+        if assumptions:
+            rows = [
+                [
+                    item.get("statement", ""),
+                    item.get("importance", ""),
+                    item.get("confidence", ""),
+                    item.get("status", ""),
+                ]
+                for item in assumptions[:8]
+            ]
+            parts.append(self._table([["assumption", "importance", "confidence", "status"]] + rows))
+        else:
+            parts.append("No assumptions were saved.")
+        if disputes:
+            rows = [
+                [
+                    item.get("question", ""),
+                    (item.get("side_a") or {}).get("claim", ""),
+                    (item.get("side_b") or {}).get("claim", ""),
+                    item.get("status", ""),
+                ]
+                for item in disputes[:8]
+            ]
+            parts.append(self._table([["dispute", "side A", "side B", "status"]] + rows))
+        else:
+            parts.append("No disputes were saved.")
+        return "\n\n".join(parts)
 
     def _template_lens(self, state: Dict[str, Any]) -> str:
         template_id = state.get("selected_report_template") or "generic_forecast_memo"
@@ -158,11 +221,11 @@ class StructuredReportAdapter:
         paragraphs = []
         if question:
             paragraphs.append(
-                f"Horizon XL treated the question as a `{domain}` simulation: {question}"
+                f"Horizon XL treated the question as `{domain}`: {question}"
             )
         else:
             paragraphs.append(
-                f"Horizon XL treated this as a `{domain}` simulation and converted the prompt into actors, scenarios, and target variables."
+                f"Horizon XL treated this as `{domain}` and converted the prompt into actors, scenarios, and target variables."
             )
 
         if final_rows:
@@ -192,7 +255,7 @@ class StructuredReportAdapter:
         if graph:
             numeric_count = graph.get("numeric_fact_count", 0) or 0
             evidence_count = graph.get("evidence_claim_count", 0) or 0
-            if numeric_count < 3:
+            if numeric_count < 6:
                 paragraphs.append(
                     f"Evidence caution: the signal map had only **{numeric_count} numeric facts** and **{evidence_count} evidence claims**. "
                     "The report can still be useful as a structured scenario read, but it should not sound overconfident."
@@ -207,6 +270,98 @@ class StructuredReportAdapter:
         )
         return "\n\n".join(paragraphs)
 
+    def _bottom_line(self, plan: Dict[str, Any], state: Dict[str, Any]) -> str:
+        """Write the answer a human reader came for before the audit trail."""
+        records = self._final_target_records(state)
+        if not records:
+            return (
+                "The structured state did not save clean endpoint records, so no serious bottom-line forecast can be written. "
+                "That should be treated as a failed report-quality condition even if technical validation passed."
+            )
+
+        domain_l = str(plan.get("domain") or "").lower()
+        probability_records = [
+            row for row in records
+            if row["unit"] == "percent" or "probability" in row["target_key"]
+        ]
+        pressure_records = [row for row in records if row not in probability_records]
+        probability_records.sort(key=lambda row: row["value"], reverse=True)
+        pressure_records.sort(key=lambda row: row["value"], reverse=True)
+
+        lines: List[str] = []
+        if any(term in domain_l for term in ["geopolit", "risk", "conflict", "military"]):
+            top_probs = probability_records[:5]
+            if top_probs:
+                highest = top_probs[0]
+                lines.append(
+                    f"**Base case:** this is not a clean war/no-war call. The highest saved probability lane is "
+                    f"**{highest['target']} at {self._format_value(highest['value'])}{highest['suffix']}**, while other risk lanes sit close enough "
+                    "that the practical forecast is a fragile gray-zone environment rather than a decisive resolution."
+                )
+                lines.append(
+                    "**Most exposed risk lanes:** "
+                    + ", ".join(
+                        f"{row['target']} ({self._format_value(row['value'])}{row['suffix']})"
+                        for row in top_probs
+                    )
+                    + "."
+                )
+            if pressure_records:
+                lines.append(
+                    "**Pressure channels:** "
+                    + ", ".join(
+                        f"{row['target']} ({self._format_value(row['value'])} {row['unit']})"
+                        for row in pressure_records[:4]
+                    )
+                    + ". These are where the model sees stress accumulating even without a dramatic headline event."
+                )
+            lines.append(
+                "**Plain-English read:** the useful forecast is whether deterrence, commercial risk, domestic pressure, and diplomatic off-ramps "
+                "hold together long enough to stop a localized incident from becoming the main story."
+            )
+        elif "election" in domain_l:
+            lines.append(
+                "**Base case:** read the seat, vote, turnout, and probability records together, not as a uniform swing. "
+                "The report should explain who converts support into seats, where turnout changes the map, and which blocs remain uncertain."
+            )
+            lines.extend(
+                f"- {row['target']}: **{self._format_value(row['value'])}{row['suffix']}** ({row['date']})"
+                for row in records[:8]
+            )
+        elif any(term in domain_l for term in ["narrative", "fiction", "story"]):
+            lines.append(
+                "**Story forecast:** this is a fate-board simulation, not a math contest. Treat probabilities as confidence weights for plot paths, "
+                "then read alliances, betrayals, and reveals as the real output."
+            )
+            lines.extend(
+                f"- {row['target']}: **{self._format_value(row['value'])}{row['suffix']}**"
+                for row in records[:8]
+            )
+        else:
+            lines.append("**Base case endpoint readout:**")
+            lines.extend(
+                f"- {row['target']}: **{self._format_value(row['value'])}{row['suffix']}** ({row['unit']}, {row['date']})"
+                for row in records[:8]
+            )
+
+        disagreements = self._largest_disagreements(
+            (state.get("aggregated_outputs") or {}).get("agent_disagreement") or {},
+            limit=3,
+        )
+        if disagreements:
+            lines.append(
+                "**Where not to be overconfident:** "
+                + "; ".join(f"{row[0]} in {row[1]} has spread {row[4]}" for row in disagreements)
+                + "."
+            )
+        graph = state.get("graph_context") or {}
+        if graph and (graph.get("numeric_fact_count", 0) or 0) < 6:
+            lines.append(
+                f"**Evidence caution:** the graph carried only {graph.get('numeric_fact_count', 0)} clean numeric facts. "
+                "This report should be read as a structured scenario forecast, not a fully sourced intelligence estimate."
+            )
+        return "\n\n".join(lines)
+
     def _executive_readout(self, plan: Dict[str, Any], state: Dict[str, Any]) -> str:
         validation = state.get("validation") or {}
         scenario_outputs = state.get("scenario_outputs") or {}
@@ -216,7 +371,7 @@ class StructuredReportAdapter:
         targets = self._target_names(plan, state)
 
         lines = [
-            f"- Scope: `{self._humanize(plan.get('domain') or 'other')}` simulation with `{len(targets)}` target variables, `{len(state.get('agents') or [])}` agents, and `{len(state.get('time_pockets') or [])}` time pockets.",
+            f"- Scope: `{self._humanize(plan.get('domain') or 'other')}` with `{len(targets)}` target variables, `{len(state.get('agents') or [])}` agents, and `{len(state.get('time_pockets') or [])}` time pockets.",
             f"- Validation: `{validation.get('passed', False)}` with numeric quality score `{validation.get('numeric_quality_score', 'n/a')}`.",
             f"- Scenario coverage: `{len(scenario_outputs)}` scenario paths were available: {', '.join(self._humanize(key) for key in scenario_outputs.keys()) or 'none'}.",
         ]
@@ -956,6 +1111,42 @@ class StructuredReportAdapter:
                 ])
         return rows
 
+    def _final_target_records(self, state: Dict[str, Any], limit: int = 40) -> List[Dict[str, Any]]:
+        final = (state.get("aggregated_outputs") or {}).get("final_outcome") or {}
+        target_forecast = final.get("target_forecast") or {}
+        records: List[Dict[str, Any]] = []
+        for target, point in list(target_forecast.items())[:limit]:
+            value = self._numeric_value(point.get("value"))
+            if value is None:
+                continue
+            unit = str(point.get("unit") or "")
+            records.append({
+                "target_key": str(target or ""),
+                "target": self._humanize(target),
+                "date": str(point.get("date", "")),
+                "value": value,
+                "unit": unit,
+                "suffix": "%" if unit == "percent" else "",
+                "agent_count": point.get("agent_count"),
+            })
+        if records:
+            return records
+        for row in self._final_target_rows(state, limit=limit):
+            value = self._numeric_value(row[2])
+            if value is None:
+                continue
+            unit = row[3]
+            records.append({
+                "target_key": row[0],
+                "target": row[0],
+                "date": row[1],
+                "value": value,
+                "unit": unit,
+                "suffix": "%" if unit == "percent" else "",
+                "agent_count": row[4],
+            })
+        return records
+
     def _scenario_endpoint_rows(self, scenario_outputs: Dict[str, Any]) -> List[List[str]]:
         scenario_order = [key for key in ["base_case", "upside_case", "downside_case", "tail_case"] if key in scenario_outputs]
         scenario_order.extend(key for key in scenario_outputs.keys() if key not in scenario_order)
@@ -1136,6 +1327,13 @@ class StructuredReportAdapter:
             "opportunistic",
             "risk-warning",
             "target =",
+            "state what",
+            "can observe, what it can influence",
+            "separate visible signaling",
+            "graph conscience",
+            "source cards",
+            "targets contain placeholder",
+            "auto', 'end'",
         ]
         useful = [
             sentence for sentence in sentences
