@@ -54,7 +54,7 @@ def llm_health():
     if not Config.LLM_API_KEY:
         return jsonify({"success": False, "data": payload, "error": "LLM_API_KEY is not configured"}), 503
     try:
-        client = LLMClient(timeout=8)
+        client = LLMClient(timeout=Config.LLM_TIMEOUT_SECONDS)
         response = client.chat([
             {"role": "system", "content": "Reply with exactly: ok"},
             {"role": "user", "content": "health check"},
