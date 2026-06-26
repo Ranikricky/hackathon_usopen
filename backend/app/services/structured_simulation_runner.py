@@ -2598,12 +2598,18 @@ class StructuredSimulationRunner:
         relation = self._relationship_clause(relationship)
         evidence_status = self._evidence_status_line(evidence_notes, contested_target, claimant)
         claimant_claim = self._agent_claim_from_fields(claimant, contested_target)
+        openers = [
+            f"{claimant_name}: {challenger_name}, I’ll give you part of that, but not the whole conclusion.",
+            f"{claimant_name}: That objection changes my confidence, not my entire direction yet.",
+            f"{claimant_name}: I hear the mechanism you are pointing to; here is where I still disagree.",
+        ]
+        opener = openers[round_idx % len(openers)]
         return (
-            f"{claimant_name}: {challenger_name}, that lands partly, but not all the way. "
-            f"{evidence_status} I still defend this: {claimant_claim}. "
+            f"{opener} "
+            f"{evidence_status} The claim I still defend is: {claimant_claim}. "
             f"The piece I am protecting is {axis}. {fact_basis} "
             f"My best counter-card is: {self._short_card(defense, max_len=240)}. "
-            f"So I revise from `{claimant_base}` toward `{revised}` for now. If the next pocket cannot prove the mechanism, pull that revision back."
+            f"So I revise from `{claimant_base}` toward `{revised}` for now, but only because that mechanism survived this cross-question."
         )
 
     def _concession_message(
@@ -2622,8 +2628,14 @@ class StructuredSimulationRunner:
         spread = self._numeric_spread(claimant_base, challenger_base)
         concession = self._concession_line(claimant, challenger, contested_target)
         revision = self._provisional_revision(claimant_base, challenger_base, round_idx)
+        openers = [
+            "Fair. I will concede the narrow point",
+            "I am not persuaded on the endpoint, but I concede this mechanism",
+            "That is a real weakness in my first answer",
+        ]
+        opener = openers[round_idx % len(openers)]
         return (
-            f"{claimant_name}: I concede this part to {challenger_name}: {concession}. "
+            f"{claimant_name}: {opener} to {challenger_name}: {concession}. "
             f"The gap is still `{spread}` on `{contested_target}`, so I am not abandoning my view, "
             f"but I accept a provisional move from `{claimant_base}` toward `{revision}` if the evidence check holds."
         )
@@ -2975,9 +2987,11 @@ class StructuredSimulationRunner:
         if primary:
             sample["base"] = primary.get("value")
             sample["primary_scenario"] = primary.get("scenario")
+            sample["unit"] = primary.get("unit")
         if stress:
             sample["downside"] = stress.get("value")
             sample["stress_scenario"] = stress.get("scenario")
+            sample.setdefault("unit", stress.get("unit"))
         return sample
 
     def _preferred_output_for_agent(self, outputs: List[Dict[str, Any]], agent: Dict[str, Any], pocket_label: str = "") -> Dict[str, Any]:
@@ -3273,6 +3287,7 @@ class StructuredSimulationRunner:
         base = forecast_sample.get("base")
         downside = forecast_sample.get("downside")
         confidence = forecast_sample.get("confidence")
+        unit = forecast_sample.get("unit")
         owns_numbers = (agent.get("numeric_capabilities") or {}).get("must_output_numbers", True)
         persona = agent.get("persona") if isinstance(agent.get("persona"), dict) else {}
         stakes = agent.get("stakes_profile") if isinstance(agent.get("stakes_profile"), dict) else {}
@@ -3301,7 +3316,7 @@ class StructuredSimulationRunner:
             pocket_label=pocket.get("label") or "",
         ) or "I do not have a clean source card for this lane yet"
         lens = self._role_lens(role_l, target_label)
-        numeric_sentence = self._forecast_sentence(owns_numbers, target_label, base, downside, confidence)
+        numeric_sentence = self._forecast_sentence(owns_numbers, target_label, base, downside, confidence, unit)
         pushback = self._plain_disagreement(disagreement)
         claim = self._trim_mechanical_claim(claim, target_label)
         signal = self._trim_mechanical_claim(signal, target_label)
@@ -3318,10 +3333,11 @@ class StructuredSimulationRunner:
         text = re.sub(r"\s+", " ", text).strip()
         return text or "the outcome"
 
-    def _forecast_sentence(self, owns_numbers: bool, target_label: str, base: Any, downside: Any, confidence: Any) -> str:
+    def _forecast_sentence(self, owns_numbers: bool, target_label: str, base: Any, downside: Any, confidence: Any, unit: Any = None) -> str:
         if owns_numbers and base is not None:
+            unit_label = f" {unit}" if unit else ""
             return (
-                f"My current mark is {target_label}: base {base}, stress {downside}, confidence {confidence}. "
+                f"My current mark is {target_label}: base {base}{unit_label}, stress {downside}{unit_label}, confidence {confidence}. "
                 "I am treating that as a revisable mark, not a prophecy."
             )
         return (
@@ -3492,6 +3508,15 @@ class StructuredSimulationRunner:
             return (
                 f"{target_label} should be read through commercial behavior: insurance premia, AIS usage, waiting times, rerouting, "
                 "and cargo nominations reveal stress before official statements do."
+            )
+        if any(term in role_l for term in ["consumer", "household", "buyer", "end-user", "end user", "demand"]):
+            if any(term in target_label.lower() for term in ["price", "supply", "demand", "inventory", "grid", "power", "capacity", "premium", "market"]):
+                return (
+                    f"{target_label} depends on whether end users absorb higher costs, delay orders, substitute inputs, "
+                    "or pull demand forward before the supply chain can respond."
+                )
+            return (
+                f"{target_label} moves when ordinary participants change behavior before institutions notice it in aggregate data."
             )
         if "cyber" in role_l:
             return (

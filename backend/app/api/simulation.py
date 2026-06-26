@@ -164,12 +164,32 @@ def _clean_transcript_message(turn: dict) -> str:
         return "_No message recorded._"
 
     if turn_type == "agent_argument":
+        current_claim = ""
+        claim_match = re.search(
+            r"\bMy claim on\s+(.+?)\s+is:\s+(.+?)(?:\.\s+The strongest card|\.\s+Evidence status|\.\s+What I can|$)",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if claim_match:
+            current_claim = _short_transcript_text(claim_match.group(2).strip(" ."), 280)
+        current_evidence = _extract_after(
+            message,
+            "The strongest card in my lane is",
+            stop_markers=[". Evidence check:", ". Evidence status:", ". What I can actually see", ". My current mark", ". I am not issuing"],
+            limit=280,
+        )
+        current_signal = _extract_after(
+            message,
+            "What I can actually see from my seat is",
+            stop_markers=[". My current mark", ". I am not issuing", ". I am pushing back"],
+            limit=240,
+        )
         position = _extract_after(
             message,
             "I am saying this:",
             stop_markers=[". My evidence is", ". Evidence status:", ". What I can"],
             limit=260,
-        ) or _extract_after(
+        ) or current_claim or _extract_after(
             message,
             "but my point is practical:",
             stop_markers=[". I’m comparing", ". I'm comparing", ". My stake", ". The map", ". In `", ". In "],
@@ -191,7 +211,7 @@ def _clean_transcript_message(turn: dict) -> str:
             "My evidence is",
             stop_markers=[". Evidence status:", ". What I can", ". On `", ". I am not"],
             limit=260,
-        ) or _extract_after(
+        ) or current_evidence or _extract_after(
             message,
             "the fact I’m leaning on is:",
             stop_markers=[" My evidence lane is:", " My pushback is:", " I disagree"],
@@ -206,13 +226,22 @@ def _clean_transcript_message(turn: dict) -> str:
             evidence = _clean_evidence_lane(evidence)
         number = _sentence_pick(
             message,
-            includes=["my number on", "not a numeric forecast owner", "i am at base", "i am not setting"],
+            includes=["my current mark is", "my number on", "not a numeric forecast owner", "i am at base", "i am not setting", "i am not issuing a precise number"],
             excludes=["i’m coming in"],
             limit=1,
         )
+        if current_signal and "not recorded" not in current_signal.lower():
+            signal_line = current_signal
+        else:
+            signal_line = ""
         worry = _extract_after(
             message,
             "My worry is",
+            stop_markers=["; the tension", ". The tension", ". Change my mind"],
+            limit=220,
+        ) or _extract_after(
+            message,
+            "My private worry is",
             stop_markers=["; the tension", ". The tension", ". Change my mind"],
             limit=220,
         ) or _extract_after(
@@ -224,7 +253,7 @@ def _clean_transcript_message(turn: dict) -> str:
         falsifier = _extract_after(
             message,
             "Change my mind with",
-            stop_markers=[". My stake", ". My worry"],
+            stop_markers=[". My stake", ". My worry", ". My private worry"],
             limit=220,
         ) or _extract_after(message, "What would change my mind:", stop_markers=[". What still"], limit=220)
         bullets = []
@@ -232,6 +261,8 @@ def _clean_transcript_message(turn: dict) -> str:
             bullets.append(f"- Claim: {position}")
         if evidence:
             bullets.append(f"- Evidence lane: {evidence}")
+        if signal_line:
+            bullets.append(f"- Observable signal: {signal_line}")
         if number:
             bullets.append(f"- Numeric stance: {number[0]}")
         if worry:

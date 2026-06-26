@@ -407,6 +407,16 @@ class NumericValidationService:
                 errors.append("Wrong time-pocket structure: plan implies multiple sequential pockets but only one pocket was saved.")
             if self._looks_like_instruction_fragment(pocket_labels):
                 errors.append("Time-pocket labels contain instruction/output-format fragments rather than temporal or event boundaries.")
+            dispute_like_pockets = [
+                str(p.get("label") or "")
+                for p in time_pockets
+                if self._looks_like_dispute_time_pocket(str(p.get("label") or ""))
+            ]
+            if dispute_like_pockets:
+                errors.append(
+                    "Time-pocket labels contain debate/dispute questions instead of sequential time boundaries: "
+                    + ", ".join(dispute_like_pockets[:6])
+                )
             if self._contains_forbidden_phase_leakage(pocket_labels, plan):
                 errors.append("Time-pocket labels leaked forbidden or wrong-domain process phases.")
 
@@ -420,6 +430,22 @@ class NumericValidationService:
                 errors.append("Weak debate quality: transcript has no mediated forecast revision turns.")
             if len(discussion) < max(6, min(18, len(agents))):
                 warnings.append("Debate transcript is short relative to the agent roster.")
+            transcript_errors, transcript_warnings = self._validate_discussion_quality(discussion, targets)
+            errors.extend(transcript_errors)
+            warnings.extend(transcript_warnings)
+
+        graph_context = state.get("graph_context") or aggregated.get("graph_brain") or {}
+        if isinstance(graph_context, dict):
+            evidence_cards = graph_context.get("evidence_cards") or []
+            numeric_fact_count = int(graph_context.get("numeric_fact_count") or 0)
+            source_mode = str(graph_context.get("source_mode") or graph_context.get("mode") or "").lower()
+            if not evidence_cards and numeric_fact_count == 0:
+                warnings.append(
+                    "Evidence base appears prompt-only: no independent evidence cards or numeric facts were saved. "
+                    "Treat confidence as low until research/source packets are available."
+                )
+            elif "prompt" in source_mode and numeric_fact_count == 0:
+                warnings.append("Evidence base is primarily prompt-derived; confidence should remain conservative.")
 
         ledger = aggregated.get("forecast_ledger") if isinstance(aggregated, dict) else {}
         if not isinstance(ledger, dict) or not ledger.get("agent_forecast_rows"):
@@ -473,6 +499,10 @@ class NumericValidationService:
         cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", str(target or "").lower()).strip("_")
         if self._is_placeholder_target_name(cleaned):
             return True
+        if re.fullmatch(r"(?:the_)?next_\d{1,3}_(?:days|weeks|months|quarters|years)_of_.+", cleaned):
+            return True
+        if re.fullmatch(r"(?:requested|future|current|primary)_(?:future_)?outcomes?", cleaned):
+            return True
         bad_terms = [
             "following_numeric_outputs", "required_output", "output_requirements",
             "table", "chart", "report", "appendix", "explain_agent_disagreement",
@@ -489,6 +519,65 @@ class NumericValidationService:
             r"agent debate|mediator leverage|mechanism clash)\b",
             lowered,
         ))
+
+    def _looks_like_dispute_time_pocket(self, label: str) -> bool:
+        lowered = re.sub(r"\s+", " ", str(label or "").lower()).strip(" .,:;-")
+        if not lowered:
+            return False
+        if "?" in lowered or re.match(r"^(?:whether|if|does|do|is|are|can|will|should|could)\b", lowered):
+            return True
+        temporal_or_phase = bool(re.search(
+            r"\b(?:19|20)\d{2}\b|\bq[1-4]\b|\b(?:baseline|current|latest|update|phase|pocket|round|month|week|quarter|year|"
+            r"day|campaign|candidate|manifesto|alliance|voting|turnout|post[- ]?poll|aftermath|immediate|transmission|"
+            r"reaction|conversion|synthesis|final|scenario|historical|stress)\b",
+            lowered,
+        ))
+        if temporal_or_phase:
+            return False
+        return bool(re.search(
+            r"\b(priced in|offset|bottleneck|narrative exaggeration|temporary or structural|already|dominates|versus|vs)\b",
+            lowered,
+        ))
+
+    def _validate_discussion_quality(self, discussion: List[Dict[str, Any]], targets: List[str]) -> Tuple[List[str], List[str]]:
+        errors: List[str] = []
+        warnings: List[str] = []
+        agent_turns = [
+            turn for turn in discussion
+            if isinstance(turn, dict) and str(turn.get("turn_type") or "") == "agent_argument"
+        ]
+        if not agent_turns:
+            return errors, warnings
+
+        generic_claims = 0
+        prompt_only_mentions = 0
+        placeholder_mentions = 0
+        target_blob = " ".join(targets).lower()
+        for turn in agent_turns:
+            message = str(turn.get("message") or "")
+            lowered = message.lower()
+            claim_match = re.search(r"\bmy claim on\s+(.+?)\s+is:\s+", lowered)
+            if not claim_match:
+                generic_claims += 1
+            if "did not provide enough concrete detail" in lowered:
+                generic_claims += 1
+            if "prompt-only evidence" in lowered or "no independent source packet" in lowered:
+                prompt_only_mentions += 1
+            metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+            metadata_target = str(metadata.get("target") or "")
+            if metadata_target and self._is_semantic_bad_target(metadata_target):
+                placeholder_mentions += 1
+            claim_target = claim_match.group(1) if claim_match else ""
+            if re.search(r"\bthe next \d{1,3} (?:days|weeks|months|quarters|years) of\b", claim_target):
+                placeholder_mentions += 1
+
+        if generic_claims / max(len(agent_turns), 1) > 0.45:
+            errors.append("Weak debate quality: too many agent turns contain generic or non-claim language.")
+        if placeholder_mentions and (placeholder_mentions / max(len(agent_turns), 1) > 0.2 or self._is_semantic_bad_target(target_blob)):
+            errors.append("Weak debate quality: placeholder/broad horizon targets leaked into agent turns.")
+        if prompt_only_mentions / max(len(agent_turns), 1) > 0.35:
+            warnings.append("Many debate turns relied on prompt-only evidence rather than independent source packets.")
+        return errors, warnings
 
     def _generic_agent_names(self, agents: List[Dict[str, Any]]) -> List[str]:
         generic = []
@@ -589,6 +678,11 @@ class NumericValidationService:
             "turnout": r"\bturnout\b",
             "probability": r"\bprobability\b|\bchance\b|\bwin\s+probability\b",
             "price": r"\bprice\b",
+            "supply": r"\bsupply\b|\bproduction\b|\bcapacity\b",
+            "demand": r"\bdemand\b|\bconsumption\b",
+            "inventory": r"\binventory\b|\binventories\b|\bstockpile\b",
+            "threshold": r"\babove\b|\bbelow\b|\bover\b|\bunder\b|\bthreshold\b|\bexceeds?\b",
+            "risk": r"\brisk\b|\bbottleneck\b|\bdisruption\b",
             "rate": r"\brate\b",
             "index": r"\bindex\b",
             "share": r"\bshare\b",
@@ -619,6 +713,11 @@ class NumericValidationService:
             "turnout": ["turnout", "participation"],
             "probability": ["probability", "chance", "risk", "odds"],
             "price": ["price", "pricing", "cost", "premium"],
+            "supply": ["supply", "production", "capacity", "output"],
+            "demand": ["demand", "consumption", "buyer", "pressure"],
+            "inventory": ["inventory", "inventories", "stockpile", "warehouse"],
+            "threshold": ["threshold", "above", "below", "upside", "downside", "breach"],
+            "risk": ["risk", "bottleneck", "disruption", "stress"],
             "rate": ["rate", "growth", "adoption", "change"],
             "index": ["index", "score", "pressure"],
             "share": ["share", "mix", "portion"],

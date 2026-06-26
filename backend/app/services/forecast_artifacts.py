@@ -89,6 +89,44 @@ def _evidence_cards(evidence_text: str, graph_brain: Dict[str, Any] | None = Non
     return deduped[:limit]
 
 
+def _prompt_dispute_questions(evidence_text: str, limit: int = 8) -> List[str]:
+    """Extract user-supplied controversy questions for the debate spine.
+
+    These are not time pockets. They are the "what must be argued about"
+    questions that should drive cross-questioning, rebuttal, and concessions.
+    """
+    text = str(evidence_text or "")
+    if not text:
+        return []
+    heading = re.search(
+        r"(?:^|\n)\s*(?:#+\s*)?(?:the\s+debate\s+should\s+challenge|key\s+disputes?|questions?\s+to\s+resolve|"
+        r"debate\s+questions?|uncertainty\s+questions?)\s*[:\n](.+?)(?=\n\s*(?:=+\s*)?"
+        r"(?:validation|required\s+report|style\s+requirements?|rules?|required\s+output|time[- ]?pockets?|scenario|agents?)\b|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    block = heading.group(1) if heading else ""
+    questions: List[str] = []
+    if block:
+        for line in block.splitlines():
+            line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip(" .,:;-")
+            if not line:
+                continue
+            if re.search(r"\b(whether|if|does|do|is|are|can|will|should|could|versus|vs|offset|priced in|bottleneck)\b", line, re.I):
+                questions.append(_short(line, 220))
+    if not questions:
+        for match in re.finditer(
+            r"\b(?:whether|if|does|do|is|are|can|will|should|could)\s+[^.?\n]{20,220}[.?]?",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            candidate = match.group(0).strip(" .,:;-")
+            if not re.search(r"\b(do not|must|required output|generate report|copy paste)\b", candidate, re.I):
+                questions.append(_short(candidate, 220))
+    deduped = list(dict.fromkeys(questions))
+    return deduped[:limit]
+
+
 class ForecastArtifactBuilder:
     """Build thesis, assumptions, disputes, and readiness from structured inputs."""
 
@@ -202,8 +240,46 @@ class ForecastArtifactBuilder:
     ) -> List[Dict[str, Any]]:
         targets = _target_rows(domain_plan)
         evidence = _evidence_cards(evidence_text, graph_brain, limit=10)
+        prompt_disputes = _prompt_dispute_questions(evidence_text)
         numeric_agents, qualitative_agents = self._split_agents(agents)
         rows: List[Dict[str, Any]] = []
+        for idx, question in enumerate(prompt_disputes, start=1):
+            target = targets[(idx - 1) % len(targets)] if targets else {}
+            target_name = _clean(target.get("name") or "requested_outcome")
+            assumption = assumptions[(idx - 1) % len(assumptions)] if assumptions else {}
+            side_a_agents = [
+                agent.get("agent_id")
+                for agent in (numeric_agents or agents)[idx - 1:idx + 1]
+                if agent.get("agent_id")
+            ]
+            side_b_pool = qualitative_agents or agents
+            side_b_agents = [
+                agent.get("agent_id")
+                for agent in side_b_pool[idx - 1:idx + 1]
+                if agent.get("agent_id")
+            ]
+            if not side_a_agents and agents:
+                side_a_agents = [agents[0].get("agent_id")]
+            if not side_b_agents and len(agents) > 1:
+                side_b_agents = [agents[-1].get("agent_id")]
+            rows.append({
+                "dispute_id": _stable_id("dispute", "prompt", question, target_name),
+                "question": question,
+                "side_a": {
+                    "claim": f"The central forecast should move if this dispute materially changes {target_name}.",
+                    "agents": [item for item in side_a_agents if item],
+                    "evidence": evidence[idx - 1:idx + 1],
+                },
+                "side_b": {
+                    "claim": f"The opposing lane argues this dispute may be overstated, already reflected, or offset by another mechanism.",
+                    "agents": [item for item in side_b_agents if item],
+                    "evidence": evidence[idx:idx + 2],
+                },
+                "linked_targets": [target_name] if target_name else [],
+                "linked_assumptions": [assumption.get("assumption_id")] if assumption.get("assumption_id") else [],
+                "required_for_debate": True,
+                "status": "unresolved",
+            })
         for idx, target in enumerate(targets[:8], start=1):
             target_name = _clean(target.get("name"))
             assumption = assumptions[(idx - 1) % len(assumptions)] if assumptions else {}

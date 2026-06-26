@@ -739,7 +739,7 @@ def _extract_explicit_target_items(text: str) -> List[str]:
     collecting = False
     for line in (text or "").splitlines():
         if re.search(
-            r"(?:core\s+forecast\s+targets?|forecast\s+targets?|the simulation must forecast|must forecast|forecast(?:\s+the)?\s+following\s+numeric\s+outputs?|forecast\s+these\s+numeric\s+variables|required\s+numeric\s+variables|target\s+variables?(?:\s+that\s+must\s+be\s+numeric)?|target\s+variables?[^:\n]{0,80})\s*:\s*$",
+            r"(?:core\s+forecast\s+targets?|forecast\s+targets?|forecast|the simulation must forecast|must forecast|forecast(?:\s+the)?\s+following\s+numeric\s+outputs?|forecast\s+these\s+numeric\s+variables|required\s+numeric\s+variables|target\s+variables?(?:\s+that\s+must\s+be\s+numeric)?|target\s+variables?[^:\n]{0,80})\s*:\s*$",
             line,
             flags=re.IGNORECASE,
         ):
@@ -751,15 +751,18 @@ def _extract_explicit_target_items(text: str) -> List[str]:
         if match:
             bullet_targets.append(match.group(1).strip(" .,:;-"))
             continue
-        if bullet_targets and re.match(r"^\s*(?:[A-Z][A-Za-z /-]{2,60}|[A-Z0-9][A-Za-z0-9 /-]{2,60})\s*:\s*$", line.strip()):
+        if bullet_targets and re.match(
+            r"^\s*(?:[A-Za-z][A-Za-z0-9 /-]{2,80})\s*:\s*$",
+            line.strip(),
+        ):
             break
         if bullet_targets and line.strip():
             break
 
     items = _extract_numbered_items_after_heading(
         text,
-        r"(?:core\s+forecast\s+targets?|forecast\s+targets?|forecast(?:\s+the)?\s+following\s+numeric\s+outputs?|forecast these numeric variables|target variables?(?:\s+that\s+must\s+be\s+numeric)?|target variables?[^:\n]{0,80}|required numeric variables)\s*[:\n]",
-        r"(?:\n\s*(?:Historical baseline|Current political setup|Regional structure|Key forces|Scenarios?\s+to\s+model|Scenario Paths|Required Agents?|Create\s+(?:dynamic\s+)?(?:\d{1,3}\s+)?.*agents?|For every agent|Agent behavior rules?|Run the simulation|Required Time[- ]?Pockets?|Time[- ]?Pocket|Debate Format|Validation Requirements|Required Report Format|Style Requirements|Run four scenarios|Required output|Rules)\b|\n\s*\d+\.\s*(?:Historical|Current|Agent Architecture|Scenarios?\s+to\s+model|Required Agents?|Required Time[- ]?Pockets?|Time[- ]?Pocket|Scenario Paths|Required output|Rules)\b)",
+        r"(?:core\s+forecast\s+targets?|forecast\s+targets?|forecast(?:\s+the)?\s+following\s+numeric\s+outputs?|forecast these numeric variables|forecast|target variables?(?:\s+that\s+must\s+be\s+numeric)?|target variables?[^:\n]{0,80}|required numeric variables)\s*[:\n]",
+        r"(?:\n\s*(?:Context to use|Key actors?|Historical baseline|Current political setup|Regional structure|Key forces|Scenarios?\s+to\s+model|Scenario Paths|Required Agents?|Create\s+(?:dynamic\s+)?(?:\d{1,3}\s+)?.*agents?|For every agent|Agent behavior rules?|Run the simulation|Required Time[- ]?Pockets?|Time[- ]?Pockets?|Debate Format|The debate should challenge|Validation Requirements|Required Report Format|Style Requirements|Run four scenarios|Required output|Rules)\b|\n\s*\d+\.\s*(?:Context|Historical|Current|Agent Architecture|Scenarios?\s+to\s+model|Required Agents?|Required Time[- ]?Pockets?|Time[- ]?Pockets?|Scenario Paths|Required output|Rules)\b)",
         limit=100,
     )
     merged = []
@@ -783,6 +786,37 @@ def _extract_time_pocket_items(text: str) -> List[str]:
         r"(?:\n\s*(?:Do not use|Do not include|Avoid|Run four scenarios|Scenario Paths|Debate Format|Validation Requirements|Required Report Format|Required output|Rules)\b|\n\s*\d+\.\s*(?:Scenario Paths|Debate Format|Validation Requirements|Required output|Rules)\b|$)",
         limit=80,
     )
+
+
+def _looks_like_dispute_time_pocket(label: str) -> bool:
+    """Reject dispute questions that accidentally land in the time-pocket list.
+
+    This is generic: a valid pocket should be a time/event boundary or a phase.
+    Questions such as "whether X is priced in" belong in the dispute registry,
+    not the sequential simulation clock.
+    """
+    text = re.sub(r"\s+", " ", str(label or "")).strip(" .,:;-")
+    lowered = text.lower()
+    if not text:
+        return True
+    if "?" in text or re.match(r"^(?:whether|if|does|do|is|are|can|will|should|could)\b", lowered):
+        return True
+    temporal_or_phase = bool(re.search(
+        r"\b(?:19|20)\d{2}\b|\bq[1-4]\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b|"
+        r"\b(?:baseline|current|latest|update|phase|pocket|round|month|monthly|week|weekly|quarter|quarterly|year|yearly|"
+        r"day|daily|campaign|candidate|manifesto|alliance|voting|turnout|post[- ]?poll|aftermath|immediate|"
+        r"transmission|reaction|conversion|synthesis|final|scenario|historical|current-state|stress)\b",
+        lowered,
+    ))
+    if temporal_or_phase:
+        return False
+    dispute_markers = [
+        "priced in", "offset", "bottleneck", "narrative exaggeration", "temporary or structural",
+        "genuine", "already", "dominates", "dominant", "versus", "vs", "trade-off", "tradeoff",
+    ]
+    if any(marker in lowered for marker in dispute_markers):
+        return True
+    return len(text.split()) > 10
 
 
 def _extract_scenario_items(text: str) -> List[Dict[str, Any]]:
@@ -1043,6 +1077,29 @@ def _domain_target_fallbacks(text: str) -> List[Dict[str, Any]]:
         add("identity_reveal_probability", "percent", "Prompt-derived narrative target: probability of identity or secret reveal.")
         add("throne_claim_probability", "percent", "Prompt-derived narrative target: probability of throne or legitimacy claim success.")
         add("magic_revelation_probability", "percent", "Prompt-derived narrative target: probability of magic or prophecy revelation.")
+
+    if re.search(
+        r"\b(price|market|commodity|commodities|supply|demand|inventory|inventories|capacity|production|"
+        r"shortage|surplus|deficit|bottleneck|risk premium|premium|export|import|shipping|grid|energy)\b",
+        lowered,
+    ):
+        if re.search(r"\b(price|prices|pricing|usd|dollars?|premium)\b", lowered):
+            unit = _infer_unit(lowered)
+            if unit == "currency_or_index":
+                unit = "currency_or_index"
+            add("benchmark_price", unit, "Prompt-derived market target: benchmark price level or range.")
+        if re.search(r"\b(above|over|exceed|exceeds|exceeding|breaks?|threshold)\b", lowered):
+            add("upside_price_threshold_probability", "percent", "Prompt-derived market target: probability of breaching an upside price threshold.")
+        if re.search(r"\b(below|under|floor|downside)\b", lowered):
+            add("downside_price_threshold_probability", "percent", "Prompt-derived market target: probability of breaching a downside price threshold.")
+        if re.search(r"\b(supply|production|capacity|mine|mines|producer|output|export)\b", lowered):
+            add("supply_disruption_risk", "percent", "Prompt-derived market target: supply disruption risk.")
+        if re.search(r"\b(demand|consumption|buyer|buyers|industrial|data[- ]?center|ev|ai)\b", lowered):
+            add("demand_pressure_index", "index", "Prompt-derived market target: demand pressure.")
+        if re.search(r"\b(inventory|inventories|stockpile|stockpiles|warehouse)\b", lowered):
+            add("inventory_stress_index", "index", "Prompt-derived market target: inventory stress.")
+        if re.search(r"\b(grid|power|electricity|energy|transmission|bottleneck)\b", lowered):
+            add("infrastructure_bottleneck_risk", "percent", "Prompt-derived market target: infrastructure or grid bottleneck risk.")
 
     return targets
 
@@ -1974,6 +2031,7 @@ Rules:
         target_source = target_text or combined_text
         extracted_targets = _extract_target_variables(target_source)
         has_explicit_prompt_targets = bool(_extract_explicit_target_items(target_source))
+        extracted_time_pockets = _extract_time_pocket_items(target_source)
         raw_target_values = extracted_targets if has_explicit_prompt_targets else (plan.get("target_variables") or extracted_targets)
         targets = self._merge_target_variables(
             self._normalize_target_variables(raw_target_values),
@@ -2000,7 +2058,7 @@ Rules:
             "validation_requirements": self._ensure_list(plan.get("validation_requirements"), DEFAULT_VALIDATION_REQUIREMENTS),
         }
         normalized["time_pockets"] = self._normalize_time_pockets(
-            plan.get("time_pockets") or _extract_time_pocket_items(target_source),
+            extracted_time_pockets or plan.get("time_pockets"),
             normalized["forecast_horizon"],
             target_source,
         )
@@ -2224,6 +2282,8 @@ Rules:
                 start = "auto"
                 end = "auto"
                 events = []
+            if _looks_like_dispute_time_pocket(label):
+                continue
             pockets.append({
                 "pocket_id": f"pocket_{idx:03d}",
                 "label": label,
